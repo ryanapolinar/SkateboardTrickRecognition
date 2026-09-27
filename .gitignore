@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Raw dataset video files (do not commit large binaries to git)
+data/raw/
+checkpoints/

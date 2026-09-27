@@ -1,0 +1,92 @@
+{
+  "ollie": {
+    "flip": 0,
+    "board_spin": 0,
+    "body_spin": 0,
+    "display": "Ollie"
+  },
+  "kickflip": {
+    "flip": 1,
+    "board_spin": 0,
+    "body_spin": 0,
+    "display": "Kickflip"
+  },
+  "heelflip": {
+    "flip": -1,
+    "board_spin": 0,
+    "body_spin": 0,
+    "display": "Heelflip"
+  },
+  "pop_shuvit": {
+    "flip": 0,
+    "board_spin": 1,
+    "body_spin": 0,
+    "display": "Pop Shuvit"
+  },
+  "fs_shuvit": {
+    "flip": 0,
+    "board_spin": -1,
+    "body_spin": 0,
+    "display": "Frontside Shuvit"
+  },
+  "bs_180": {
+    "flip": 0,
+    "board_spin": 1,
+    "body_spin": 1,
+    "display": "Backside 180"
+  },
+  "fs_180": {
+    "flip": 0,
+    "board_spin": -1,
+    "body_spin": -1,
+    "display": "Frontside 180"
+  },
+  "varial_kickflip": {
+    "flip": 1,
+    "board_spin": 1,
+    "body_spin": 0,
+    "display": "Varial Kickflip"
+  },
+  "varial_heelflip": {
+    "flip": -1,
+    "board_spin": -1,
+    "body_spin": 0,
+    "display": "Varial Heelflip"
+  },
+  "hardflip": {
+    "flip": 1,
+    "board_spin": -1,
+    "body_spin": 0,
+    "display": "Hardflip"
+  },
+  "inward_heelflip": {
+    "flip": -1,
+    "board_spin": 1,
+    "body_spin": 0,
+    "display": "Inward Heelflip"
+  },
+  "tre_flip": {
+    "flip": 1,
+    "board_spin": 2,
+    "body_spin": 0,
+    "display": "360 Flip"
+  },
+  "laser_flip": {
+    "flip": -1,
+    "board_spin": -2,
+    "body_spin": 0,
+    "display": "Laser Flip"
+  },
+  "double_kickflip": {
+    "flip": 2,
+    "board_spin": 0,
+    "body_spin": 0,
+    "display": "Double Kickflip"
+  },
+  "double_heelflip": {
+    "flip": -2,
+    "board_spin": 0,
+    "body_spin": 0,
+    "display": "Double Heelflip"
+  }
+}

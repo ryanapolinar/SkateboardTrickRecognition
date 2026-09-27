@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skateid"
+version = "0.3.0"
+description = "Flatground skateboard trick recognition (2026 stack)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "opencv-python-headless>=4.8",
+    "fastapi>=0.110",
+    "uvicorn>=0.28",
+    "scikit-learn>=1.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+deeplearning = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "ultralytics>=8.3",
+]
+
+[project.scripts]
+skateid = "skateid.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["skateid*"]
+exclude = ["data*", "checkpoints*", "tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-p no:cacheprovider"
+
