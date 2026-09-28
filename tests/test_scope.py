@@ -58,8 +58,9 @@ def test_manifest_schema_and_values():
     df = pd.read_csv(manifest_path)
     required_cols = [
         "clip_id", "dataset", "file_path", "sha256", "label",
-        "skater_id", "camera_id", "duration_sec", "frame_count",
-        "fps", "width", "height", "split_published", "split_clean",
+        "skater_id", "skater_id_source", "camera_id", "duration_sec",
+        "frame_count", "fps", "width", "height", "split_published",
+        "split_holdout",
     ]
     for col in required_cols:
         assert col in df.columns, f"Missing {col} in manifest"
@@ -67,11 +68,15 @@ def test_manifest_schema_and_values():
     assert len(df) == 222, f"Expected 222 clips, found {len(df)}"
     assert set(df["label"].unique()) == {"kickflip", "ollie"}
     assert set(df["split_published"].unique()) == {"train", "test"}
-    assert set(df["split_clean"].unique()) == {"train", "test"}
+    assert set(df["split_holdout"].unique()) == {"train", "test"}
     assert df["sha256"].nunique() == 222, "Expected 222 unique sha256 digests"
 
-    # Skater disjointness check on split_clean
-    train_skaters = set(df[df["split_clean"] == "train"]["skater_id"])
-    test_skaters = set(df[df["split_clean"] == "test"]["skater_id"])
-    assert len(train_skaters & test_skaters) == 0, "split_clean skaters must be completely disjoint"
+    # The skater IDs are a documented placeholder, not real identities.
+    assert set(df["skater_id_source"].unique()) == {"synthetic_clip_number"}
+
+    # Partition check: split_holdout assigns every clip to exactly one side.
+    train_holdout = set(df[df["split_holdout"] == "train"]["clip_id"])
+    test_holdout = set(df[df["split_holdout"] == "test"]["clip_id"])
+    assert len(train_holdout & test_holdout) == 0, "holdout partitions must not overlap"
+    assert len(train_holdout | test_holdout) == len(df), "holdout must cover every clip"
 

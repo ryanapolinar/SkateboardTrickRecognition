@@ -385,10 +385,36 @@ eval baseline), `fastapi`, `uvicorn`, `python-multipart`, `opencv-python`, `nump
 | | Work | Exit gate |
 |---|---|---|
 | **M0** half day | uv env + skeleton + download 222 clips + manifest + both splits + B0/B1/B2 | `skateid train && skateid eval` prints a confusion matrix + a floor |
-| **M1** 1 day | pose features + LR -> tiny transformer, flip head (regression + quantization) | >= 95 % macro-F1 on the clean split; **else stop and fix features before scaling** |
+| **M1** 1 day | pose features + LR -> tiny transformer, flip head (regression + quantization) | >= 95 % macro-F1 vs. `split_holdout` sanity floor (not a generalisation claim until M3); **else stop and fix features before scaling** |
 | **M2** 1-2 days | board corners merged (still zero labels); oracle plots for board features | board stream adds >= 3 macro-F1 over pose-only; flip visible in `--debug` |
 | **M3** 2-4 days | `skateid serve` end-to-end on 2 classes; then the BATB cutter + SkateAI's 449 clips; more heads; abstain calibration | all three rotation heads live; >= 90 % correct-or-abstained; web page shows trick or "not sure" in <2 s |
 | **M4** optional | web polish (annotate toggle, top-3 list, batch in page); ONNX export; distill board -> YOLO26-OBB | < 0.5 s/clip |
+
+### 12.1 M0 status as built (2026-09-27)
+
+| Item | Status |
+|---|---|
+| env | **system Python 3.10** — `uv` is not installed on this machine; `pyproject.toml` stays uv/pip-compatible for later |
+| data | 222 SkateboardML clips (Kickflip 114 / Ollie 108), 0 duplicate content hashes |
+| manifest | `data/manifest.csv`, 222 rows |
+
+**Honest limitation — there is no clean split yet.** SkateboardML publishes no skater or
+session identity, so `skater_id` in the manifest is a synthetic bucket over the clip number
+(`num % 8`, recorded in the `skater_id_source` column as `synthetic_clip_number`). The column
+is deliberately named `split_holdout`, **not** `split_clean`, because it is a placeholder that
+only proves the split plumbing works. It must never be reported as a leakage-free benchmark,
+and the dataset is drawn from such a small pool of people that a genuine person-disjoint split
+is not achievable from SkateboardML alone. A real clean split becomes possible at **M3**, once
+SkateAI's per-clip skater labels are in the manifest; until then the M1 exit gate below reads
+"macro-F1 on `split_holdout`" as a sanity floor, not as a generalisation claim.
+
+M0 baseline floor (B0 majority class, no learning):
+
+| Split | Test clips | Majority class | Accuracy | Macro F1 |
+|---|---|---|---|---|
+| `split_published` (author's own list) | 44 | ollie | 0.3409 | 0.2542 |
+| `split_holdout` (placeholder) | 58 | kickflip | 0.5172 | 0.3409 |
+
 
 ---
 
@@ -396,7 +422,7 @@ eval baseline), `fastapi`, `uvicorn`, `python-multipart`, `opencv-python`, `nump
 
 | Risk | Mitigation |
 |---|---|
-| Public-clip near-duplicates inflate scores | hash + perceptual dedup; skater/source-disjoint split; report both splits |
+| Public-clip near-duplicates inflate scores | hash + perceptual dedup; skater/source-disjoint split; report both splits. **SkateboardML cannot supply a real skater-disjoint split** (no skater labels, tiny pool of people), so its `split_holdout` is a placeholder and the first genuine clean split arrives with SkateAI at M3 |
 | Oblique/vertical camera makes board roll ambiguous | skater-relative features, stance normalisation, mirrored aug, capture guide in README; the sign convention is checked in `--debug` |
 | **Wrong/unknown stance -> kick<->heel, fs<->bs mirror** | default `auto` (suggest-only, never trusted); user overrides to goofy/regular; show the stance on the page + output; verify the sign in `--debug` |
 | Tiny data overfits | ~0.5 M-param model, LR floor, heavy aug, early-stop on clean val |

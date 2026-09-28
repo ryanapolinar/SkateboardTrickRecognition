@@ -15,6 +15,7 @@ MANIFEST_COLUMNS = [
     "sha256",
     "label",
     "skater_id",
+    "skater_id_source",
     "camera_id",
     "duration_sec",
     "frame_count",
@@ -22,7 +23,7 @@ MANIFEST_COLUMNS = [
     "width",
     "height",
     "split_published",
-    "split_clean",
+    "split_holdout",
 ]
 
 def compute_sha256(path: Path) -> str:
@@ -69,13 +70,22 @@ def generate_skater_disjoint_split(
 SKATEBOARDML_TAR_URL = "https://codeload.github.com/LightningDrop/SkateboardML/tar.gz/refs/heads/master"
 
 
-def fetch_skateboardml(dest_dir: Path | str = "data/raw/skateboardml") -> Path:
-    """Download and extract the SkateboardML dataset tarball."""
+def fetch_skateboardml(dest_dir: Path | str = "data/raw/skateboardml", force: bool = False) -> Path:
+    """Download and extract the SkateboardML dataset tarball.
+
+    Skips the download when clips already exist locally, so the manifest can be
+    rebuilt cheaply. Pass ``force=True`` to re-download.
+    """
     import tarfile
     import urllib.request
 
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
+
+    existing = [p for p in dest.rglob("*") if p.is_file() and p.suffix.lower() == ".mov"]
+    if existing and not force:
+        print(f"Found {len(existing)} existing clips in {dest}; skipping download (use force=True to refresh).")
+        return dest
 
     print(f"Streaming SkateboardML archive from {SKATEBOARDML_TAR_URL}...")
     req = urllib.request.Request(
@@ -140,7 +150,11 @@ def build_manifest(raw_dir: Path | str = "data/raw/skateboardml", out_csv: Path 
         clip_id = f"sbml_{Path(c).stem.lower()}"
         nums = re.findall(r"\d+", Path(c).name)
         num = int(nums[0]) if nums else 0
+        # NOTE: SkateboardML does not publish skater identities, so this ID is a
+        # synthetic bucket over the clip number. It must never be presented as a
+        # real person identifier; see `skater_id_source` below.
         skater_id = f"skater_{num % 8:02d}"
+        skater_id_source = "synthetic_clip_number"
 
         if rel_path.lower() in pub_train:
             split_pub = "train"
@@ -149,8 +163,11 @@ def build_manifest(raw_dir: Path | str = "data/raw/skateboardml", out_csv: Path 
         else:
             split_pub = "train"
 
-        # Skater-disjoint clean split (~25% test)
-        split_clean = "test" if skater_id in ("skater_00", "skater_01") else "train"
+        # PLACEHOLDER holdout split (~25% test). Because skater_id is synthetic
+        # this is NOT a genuine skater-disjoint split and must not be reported as
+        # a leakage-free benchmark. A real clean split arrives with datasets that
+        # ship per-skater labels.
+        split_holdout = "test" if skater_id in ("skater_00", "skater_01") else "train"
 
         rows.append({
             "clip_id": clip_id,
@@ -159,6 +176,7 @@ def build_manifest(raw_dir: Path | str = "data/raw/skateboardml", out_csv: Path 
             "sha256": sha,
             "label": trick_label,
             "skater_id": skater_id,
+            "skater_id_source": skater_id_source,
             "camera_id": f"cam_{w}x{h}",
             "duration_sec": round(dur, 2),
             "frame_count": frames,
@@ -166,7 +184,7 @@ def build_manifest(raw_dir: Path | str = "data/raw/skateboardml", out_csv: Path 
             "width": w,
             "height": h,
             "split_published": split_pub,
-            "split_clean": split_clean,
+            "split_holdout": split_holdout,
         })
 
     df = pd.DataFrame(rows)

@@ -100,12 +100,12 @@ def main() -> int:
 
     train_p = subparsers.add_parser("train", help="Train trick recognition model")
     train_p.add_argument("--manifest", default="data/manifest.csv", help="Path to manifest CSV")
-    train_p.add_argument("--split", choices=["published", "clean"], default="published", help="Split to use")
+    train_p.add_argument("--split", choices=["published", "holdout"], default="published", help="Split to use")
     train_p.add_argument("--checkpoint-dir", default="checkpoints", help="Directory to save model checkpoints")
 
     eval_p = subparsers.add_parser("eval", help="Evaluate trick recognition model")
     eval_p.add_argument("--manifest", default="data/manifest.csv", help="Path to manifest CSV")
-    eval_p.add_argument("--split", choices=["published", "clean"], default="published", help="Split to use")
+    eval_p.add_argument("--split", choices=["published", "holdout"], default="published", help="Split to use")
     eval_p.add_argument("--checkpoint-dir", default="checkpoints", help="Directory where model checkpoints are saved")
 
     args = parser.parse_args()
