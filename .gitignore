@@ -6,6 +6,15 @@ build/
 dist/
 .pytest_cache/
 
+# Virtual environments (never commit interpreters or installed packages)
+.venv/
+.venv*/
+venv/
+
 # Raw dataset video files (do not commit large binaries to git)
 data/raw/
 checkpoints/
+
+# Cached frozen-embedder features (regenerable, tens of MB per backend)
+cache/
+

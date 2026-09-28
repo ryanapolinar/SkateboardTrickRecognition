@@ -8,6 +8,17 @@ version = "0.3.0"
 description = "Flatground skateboard trick recognition (2026 stack)"
 readme = "README.md"
 requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
 dependencies = [
     "numpy>=1.24",
     "pandas>=2.0",
@@ -15,6 +26,8 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.28",
     "scikit-learn>=1.4",
+    # Used by `skateid fetch --dataset skateai` to pull clips from the BATB sources.
+    "yt-dlp>=2025.1",
 ]
 
 [project.optional-dependencies]
@@ -22,9 +35,19 @@ dev = [
     "pytest>=8.0",
 ]
 deeplearning = [
-    "torch>=2.2",
-    "torchvision>=0.17",
+    # torch 2.6 is the first release with cp313 wheels; pip resolves to the
+    # newest compatible build (2.14.x on Python 3.14).
+    "torch>=2.6",
+    "torchvision>=0.21",
     "ultralytics>=8.3",
+    # B1's strongest frozen-embedder backend (`skateid baselines --b1
+    # --embedder videomae`). Pinned <5 deliberately: VideoMAE's checkpoint uses
+    # legacy '{0...11}' state-dict keys that torch 2.x no longer expands, so
+    # transformers 5.x silently leaves the attention biases randomly initialised
+    # and the "frozen" encoder is partly noise. VideoMAEEmbedder asserts a
+    # complete load, so this pin failing is a loud error, not a wrong score.
+    # The weaker torchvision backends work without transformers at all.
+    "transformers>=4.44,<5",
 ]
 
 [project.scripts]
