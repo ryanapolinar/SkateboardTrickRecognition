@@ -1,92 +1,235 @@
 {
+  "_comment": "Rotation dictionary: the single source of truth mapping a trick name to the three rotations the model predicts (plan section 4). Keys must also appear in data/flatground_allowlist.csv; human and upstream spellings live there as aliases, not here. Keys starting with '_' are documentation and are skipped by the loader.",
+  "_sign_convention": "Signed integers in the STANCE-NORMALIZED frame (plan section 7). flip: +kickflip / -heelflip, one unit = 360 deg. board_spin: +backside / -frontside, one unit = 180 deg. body_spin: +backside / -frontside, one unit = 180 deg. Magnitudes are counts, clamped to 0..3 by the quantizer.",
+  "_note": "backside is positive because that is what the ingested data uses: SkateAI's treflip clips carry board_rotation_type='backside' with number 2, and tre_flip below is board_spin=2. The sign row of plan section 4 read the other way round; that was a typo, corrected in v0.3.1.",
   "ollie": {
+    "display": "Ollie",
     "flip": 0,
     "board_spin": 0,
-    "body_spin": 0,
-    "display": "Ollie"
+    "body_spin": 0
   },
   "kickflip": {
+    "display": "Kickflip",
     "flip": 1,
     "board_spin": 0,
-    "body_spin": 0,
-    "display": "Kickflip"
+    "body_spin": 0
   },
   "heelflip": {
+    "display": "Heelflip",
     "flip": -1,
     "board_spin": 0,
-    "body_spin": 0,
-    "display": "Heelflip"
+    "body_spin": 0
   },
   "pop_shuvit": {
+    "display": "Pop Shuvit",
     "flip": 0,
     "board_spin": 1,
-    "body_spin": 0,
-    "display": "Pop Shuvit"
+    "body_spin": 0
   },
   "fs_shuvit": {
+    "display": "Frontside Shuvit",
     "flip": 0,
     "board_spin": -1,
-    "body_spin": 0,
-    "display": "Frontside Shuvit"
+    "body_spin": 0
   },
   "bs_180": {
+    "display": "Backside 180",
     "flip": 0,
     "board_spin": 1,
-    "body_spin": 1,
-    "display": "Backside 180"
+    "body_spin": 1
   },
   "fs_180": {
+    "display": "Frontside 180",
     "flip": 0,
     "board_spin": -1,
-    "body_spin": -1,
-    "display": "Frontside 180"
+    "body_spin": -1
   },
   "varial_kickflip": {
+    "display": "Varial Kickflip",
     "flip": 1,
     "board_spin": 1,
-    "body_spin": 0,
-    "display": "Varial Kickflip"
+    "body_spin": 0
   },
   "varial_heelflip": {
+    "display": "Varial Heelflip",
     "flip": -1,
     "board_spin": -1,
-    "body_spin": 0,
-    "display": "Varial Heelflip"
+    "body_spin": 0
   },
   "hardflip": {
+    "display": "Hardflip",
     "flip": 1,
     "board_spin": -1,
-    "body_spin": 0,
-    "display": "Hardflip"
+    "body_spin": 0
   },
   "inward_heelflip": {
+    "display": "Inward Heelflip",
     "flip": -1,
     "board_spin": 1,
-    "body_spin": 0,
-    "display": "Inward Heelflip"
+    "body_spin": 0
   },
   "tre_flip": {
+    "display": "360 Flip",
     "flip": 1,
     "board_spin": 2,
-    "body_spin": 0,
-    "display": "360 Flip"
+    "body_spin": 0
   },
   "laser_flip": {
+    "display": "Laser Flip",
     "flip": -1,
     "board_spin": -2,
-    "body_spin": 0,
-    "display": "Laser Flip"
+    "body_spin": 0
   },
   "double_kickflip": {
+    "display": "Double Kickflip",
     "flip": 2,
     "board_spin": 0,
-    "body_spin": 0,
-    "display": "Double Kickflip"
+    "body_spin": 0
   },
   "double_heelflip": {
+    "display": "Double Heelflip",
     "flip": -2,
     "board_spin": 0,
-    "body_spin": 0,
-    "display": "Double Heelflip"
+    "body_spin": 0
+  },
+  "bs_360": {
+    "display": "Backside 360",
+    "flip": 0,
+    "board_spin": 2,
+    "body_spin": 2
+  },
+  "fs_360": {
+    "display": "Frontside 360",
+    "flip": 0,
+    "board_spin": -2,
+    "body_spin": -2
+  },
+  "bs_bigspin": {
+    "display": "Backside Bigspin",
+    "flip": 0,
+    "board_spin": 2,
+    "body_spin": 1
+  },
+  "fs_bigspin": {
+    "display": "Frontside Bigspin",
+    "flip": 0,
+    "board_spin": -2,
+    "body_spin": -1
+  },
+  "bs_360_shuvit": {
+    "display": "Backside 360 Shuvit",
+    "flip": 0,
+    "board_spin": 2,
+    "body_spin": 0
+  },
+  "fs_360_shuvit": {
+    "display": "Frontside 360 Shuvit",
+    "flip": 0,
+    "board_spin": -2,
+    "body_spin": 0
+  },
+  "bs_180_kickflip": {
+    "display": "Backside 180 Kickflip",
+    "flip": 1,
+    "board_spin": 1,
+    "body_spin": 1
+  },
+  "fs_180_kickflip": {
+    "display": "Frontside 180 Kickflip",
+    "flip": 1,
+    "board_spin": -1,
+    "body_spin": -1
+  },
+  "bs_180_heelflip": {
+    "display": "Backside 180 Heelflip",
+    "flip": -1,
+    "board_spin": 1,
+    "body_spin": 1
+  },
+  "fs_180_heelflip": {
+    "display": "Frontside 180 Heelflip",
+    "flip": -1,
+    "board_spin": -1,
+    "body_spin": -1
+  },
+  "bs_180_double_kickflip": {
+    "display": "Backside 180 Double Kickflip",
+    "flip": 2,
+    "board_spin": 1,
+    "body_spin": 1
+  },
+  "fs_180_double_kickflip": {
+    "display": "Frontside 180 Double Kickflip",
+    "flip": 2,
+    "board_spin": -1,
+    "body_spin": -1
+  },
+  "bs_360_kickflip": {
+    "display": "Backside 360 Kickflip",
+    "flip": 1,
+    "board_spin": 2,
+    "body_spin": 2
+  },
+  "fs_360_heelflip": {
+    "display": "Frontside 360 Heelflip",
+    "flip": -1,
+    "board_spin": -2,
+    "body_spin": -2
+  },
+  "bs_bigspin_kickflip": {
+    "display": "Bigspin Kickflip (Bigflip)",
+    "flip": 1,
+    "board_spin": 2,
+    "body_spin": 1
+  },
+  "bs_bigspin_inward_heelflip": {
+    "display": "Bigspin Inward Heelflip",
+    "flip": -1,
+    "board_spin": 2,
+    "body_spin": 1
+  },
+  "bs_biggerspin_kickflip": {
+    "display": "Biggerspin Kickflip (Biggerflip)",
+    "flip": 1,
+    "board_spin": 3,
+    "body_spin": 1
+  },
+  "fs_bigspin_heelflip": {
+    "display": "Frontside Bigspin Heelflip (Bigheel)",
+    "flip": -1,
+    "board_spin": -2,
+    "body_spin": -1
+  },
+  "tre_double_flip": {
+    "display": "Tre Double Flip",
+    "flip": 2,
+    "board_spin": 2,
+    "body_spin": 0
+  },
+  "hard_double_flip": {
+    "display": "Hard Double Flip",
+    "flip": 2,
+    "board_spin": -1,
+    "body_spin": 0
+  },
+  "half_cab": {
+    "display": "Half Cab",
+    "rotation_expressible": false,
+    "note": "A fakie backside 180. Its rotation triple is identical to bs_180, so the jargon name is recovered by combining the stance column with the rotation-derived label, exactly as plan section 3 intends. Deliberately not a separate rotation target."
+  },
+  "full_cab": {
+    "display": "Caballerial",
+    "rotation_expressible": false,
+    "note": "A fakie backside 360: same rotation triple as bs_360, recovered from (stance='fakie', label='bs_360'). Deliberately not a separate rotation target."
+  },
+  "impossible": {
+    "display": "Impossible",
+    "rotation_expressible": false,
+    "note": "The board wraps vertically around the front foot, rotating about an axis the 3-axis (flip/board/body) model does not have. Allowlisted as flatground but not representable, and absent from every ingested dataset. Ingesting an 'impossible' clip fails loudly rather than silently mislabelling it."
+  },
+  "none": {
+    "display": "No Trick",
+    "rotation_expressible": false,
+    "note": "Absence of a trick rather than a trick. Its natural triple (0,0,0) is already taken by ollie, so a rotation-only label cannot separate them; a separate no-trick gate would be needed. Absent from every ingested dataset."
   }
 }

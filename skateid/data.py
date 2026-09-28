@@ -4,16 +4,45 @@ from __future__ import annotations
 
 import csv
 import hashlib
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import pandas as pd
+
+from skateid.taxonomy import Rotation, Taxonomy
+
+# Neither upstream repository ships a licence file; GitHub's licence API returns
+# 404 for both (checked 2026-09). These strings record the terms each project
+# actually states, not a legal determination:
+#   SkateboardML README: "free to use this data for academic purposes, provided
+#   you cite this work" (Zenodo DOI 10.5281/zenodo.3986905).
+#   SkateAI: no licence statement; its labels describe Battle at the Berrics
+#   footage, which is copyrighted, so the derived clips stay local and are never
+#   redistributed (data/raw/ is gitignored).
+SKATEBOARDML_LICENSE = "academic-use-only; cite Zenodo 10.5281/zenodo.3986905"
+SKATEAI_LICENSE = "research-only; BATB footage (c) The Berrics; labels via EduardoPach/SkateAI"
+
+
+@lru_cache(maxsize=1)
+def default_taxonomy() -> Taxonomy:
+    """The shared rotation dictionary + name registry, loaded once per process."""
+    return Taxonomy.load()
+
 
 MANIFEST_COLUMNS = [
     "clip_id",
     "dataset",
     "file_path",
     "sha256",
+    # Canonical flatground name, derived from the six rotation columns below
+    # (plan sections 3-5). Never an upstream spelling.
     "label",
+    # The spelling the upstream dataset used, kept for provenance. The scope
+    # guardrail cross-checks it against the derived label, so a clip whose name
+    # and components disagree cannot be ingested silently.
+    "label_source",
+    # The terms the source dataset states.
+    "license",
     "skater_id",
     "skater_id_source",
     "camera_id",
@@ -24,7 +53,53 @@ MANIFEST_COLUMNS = [
     "height",
     "split_published",
     "split_holdout",
+    # Provenance of the grouping used to build `split_holdout`.
+    "split_source",
+    # Compositional trick metadata. Populated for datasets that publish it
+    # (SkateAI); left empty for SkateboardML, which only ships a class folder.
+    "stance",
+    "landed",
+    "flip_type",
+    "flip_number",
+    "board_rotation_type",
+    "board_rotation_number",
+    "body_rotation_type",
+    "body_rotation_number",
+    # Which source video a clip was cut from.
+    "source_video_url",
+    "source_video_title",
+    "source_group",
+    "clip_start",
+    "clip_end",
 ]
+
+# Columns that are legitimately absent for some datasets. Empty string for text,
+# NaN for numbers, so pandas keeps numeric columns numeric across datasets.
+_OPTIONAL_DEFAULTS: Dict[str, object] = {
+    "stance": "",
+    "landed": "",
+    "flip_type": "",
+    "flip_number": float("nan"),
+    "board_rotation_type": "",
+    "board_rotation_number": float("nan"),
+    "body_rotation_type": "",
+    "body_rotation_number": float("nan"),
+    "source_video_url": "",
+    "source_video_title": "",
+    "source_group": "",
+    "clip_start": float("nan"),
+    "clip_end": float("nan"),
+}
+
+USER_AGENT = "SkateID/0.3.0"
+
+
+def _manifest_row(**values: object) -> Dict[str, object]:
+    """Build a manifest row in canonical column order, filling optional gaps."""
+    row = {col: _OPTIONAL_DEFAULTS.get(col, "") for col in MANIFEST_COLUMNS}
+    row.update(values)
+    return row
+
 
 def compute_sha256(path: Path) -> str:
     """Compute sha256 hex digest for a file."""
@@ -67,6 +142,49 @@ def generate_skater_disjoint_split(
     return df[skater_col].apply(lambda s: "test" if s in test_skaters else "train")
 
 
+def generate_group_disjoint_split(
+    df: pd.DataFrame,
+    group_col: str,
+    test_size: float = 0.25,
+    seed: int = 42,
+) -> pd.Series:
+    """Assign every clip of a group to the same side of the split.
+
+    Unlike :func:`generate_skater_disjoint_split`, this consumes a grouping key
+    that actually exists in the data (for SkateAI, the BATB source video). No
+    group is ever split across train and test, so a clip cannot be scored while a
+    near-duplicate of it sits in the training set.
+
+    Note this is *group*-disjoint, not *skater*-disjoint: BATB is a 1v1 bracket
+    and competitors recur across battles, and the labels do not say which of the
+    two skaters performed a given clip.
+    """
+    import numpy as np
+
+    counts = df[group_col].value_counts()
+    groups = sorted(counts.index.tolist())
+    rng = np.random.RandomState(seed)
+    rng.shuffle(groups)
+
+    target = len(df) * test_size
+    test_groups: set = set()
+    n_test = 0
+    for group in groups:
+        # Never move every group to test, or train becomes empty.
+        if len(test_groups) + 1 >= len(groups):
+            break
+        if n_test + counts[group] <= target:
+            test_groups.add(group)
+            n_test += counts[group]
+
+    if not test_groups:
+        # No group fitted under the target (one source dominates the dataset);
+        # fall back to the smallest group so the test side is still non-empty.
+        test_groups.add(counts.sort_values().index[0])
+
+    return df[group_col].apply(lambda value: "test" if value in test_groups else "train")
+
+
 SKATEBOARDML_TAR_URL = "https://codeload.github.com/LightningDrop/SkateboardML/tar.gz/refs/heads/master"
 
 
@@ -90,7 +208,7 @@ def fetch_skateboardml(dest_dir: Path | str = "data/raw/skateboardml", force: bo
     print(f"Streaming SkateboardML archive from {SKATEBOARDML_TAR_URL}...")
     req = urllib.request.Request(
         SKATEBOARDML_TAR_URL,
-        headers={"User-Agent": "SkateID/0.3.0"},
+        headers={"User-Agent": USER_AGENT},
     )
     with urllib.request.urlopen(req) as resp:
         with tarfile.open(fileobj=resp, mode="r|gz") as tar:
@@ -114,13 +232,11 @@ def fetch_skateboardml(dest_dir: Path | str = "data/raw/skateboardml", force: bo
     return dest
 
 
-def build_manifest(raw_dir: Path | str = "data/raw/skateboardml", out_csv: Path | str = "data/manifest.csv") -> pd.DataFrame:
-    """Build standardized manifest DataFrame and save to CSV."""
+def build_skateboardml_manifest(raw_dir: Path | str = "data/raw/skateboardml") -> pd.DataFrame:
+    """Build manifest rows for the SkateboardML clips already on disk."""
     import glob
     import re
     raw_path = Path(raw_dir)
-    out_path = Path(out_csv)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     clips = sorted(list(set(glob.glob(str(raw_path / "**" / "*.mov"), recursive=True) + glob.glob(str(raw_path / "**" / "*.MOV"), recursive=True))))
     if not clips:
@@ -169,25 +285,325 @@ def build_manifest(raw_dir: Path | str = "data/raw/skateboardml", out_csv: Path 
         # ship per-skater labels.
         split_holdout = "test" if skater_id in ("skater_00", "skater_01") else "train"
 
-        rows.append({
-            "clip_id": clip_id,
-            "dataset": "skateboardml",
-            "file_path": norm_path,
-            "sha256": sha,
-            "label": trick_label,
-            "skater_id": skater_id,
-            "skater_id_source": skater_id_source,
-            "camera_id": f"cam_{w}x{h}",
-            "duration_sec": round(dur, 2),
-            "frame_count": frames,
-            "fps": round(fps, 1),
-            "width": w,
-            "height": h,
-            "split_published": split_pub,
-            "split_holdout": split_holdout,
-        })
+        # Normalise the class folder to the canonical vocabulary, then back-fill
+        # the rotation columns from the dictionary. SkateboardML publishes only a
+        # folder name, so the triple is the dictionary's rather than the
+        # dataset's -- which is what makes the union with SkateAI uniform, instead
+        # of leaving this dataset with empty components. An unrecognised folder
+        # fails here, before it can reach the manifest.
+        taxonomy = default_taxonomy()
+        label_source = trick_label
+        label = taxonomy.normalize_label(label_source)
+        rotation = taxonomy.rotation_for_label(label)
 
-    df = pd.DataFrame(rows)
+        rows.append(_manifest_row(
+            clip_id=clip_id,
+            dataset="skateboardml",
+            file_path=norm_path,
+            sha256=sha,
+            label=label,
+            label_source=label_source,
+            license=SKATEBOARDML_LICENSE,
+            skater_id=skater_id,
+            skater_id_source=skater_id_source,
+            camera_id=f"cam_{w}x{h}",
+            duration_sec=round(dur, 2),
+            frame_count=frames,
+            fps=round(fps, 1),
+            width=w,
+            height=h,
+            split_published=split_pub,
+            split_holdout=split_holdout,
+            split_source="synthetic_clip_number",
+            **rotation.components(),
+        ))
+
+    return pd.DataFrame(rows, columns=MANIFEST_COLUMNS)
+# --- SkateAI (BATB clips, 449 labelled cuts) ------------------------------
+#
+# SkateAI ships labels as data rather than video: `data/metadata/metadata.csv`
+# lists every cut as (source video URL, interval, trick decomposition) and you
+# are expected to re-cut the clips yourself. Its own downloader
+# (`labeling_tool/generate_data.py`) is unusable on a 2026 stack -- it imports
+# `pytube` (broken against current YouTube) and `moviepy.editor` (removed in
+# moviepy 2.x), and pulls in `wandb`. We re-implement the same job with
+# yt-dlp + ffmpeg.
+#
+# The source footage is Battle at the Berrics, which is copyrighted: keep the
+# clips local for research and do not redistribute them (`data/raw/` is
+# gitignored).
+
+SKATEAI_RAW_BASE = "https://raw.githubusercontent.com/EduardoPach/SkateAI/main"
+SKATEAI_LABEL_FILES = {
+    "tricks_cut.json": "data/tricks_cut.json",
+    "TRICK_NAMES.json": "data/TRICK_NAMES.json",
+    "metadata.csv": "data/metadata/metadata.csv",
+    "train_split.csv": "data/metadata/train_split.csv",
+    "validation_split.csv": "data/metadata/validation_split.csv",
+}
+SKATEAI_VIDEOS_SUBDIR = "videos"
+SKATEAI_SOURCES_SUBDIR = "_source"
+SKATEAI_CLIP_HEIGHT = 480
+
+
+def fetch_skateai(dest_dir: Path | str = "data/raw/skateai", force: bool = False) -> Path:
+    """Download SkateAI's label files (metadata only, no video) into ``dest_dir``."""
+    import urllib.request
+
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    for name, rel_path in SKATEAI_LABEL_FILES.items():
+        target = dest / name
+        if target.exists() and not force:
+            print(f"Kept existing {target}")
+            continue
+        url = f"{SKATEAI_RAW_BASE}/{rel_path}"
+        print(f"Downloading {url}")
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req) as resp:
+            target.write_bytes(resp.read())
+
+    return dest
+
+
+def _download_source_video(url: str, dest: Path) -> None:
+    """Fetch one BATB source video at <=480p with yt-dlp."""
+    import yt_dlp
+
+    opts = {
+        "format": f"bv*[height<={SKATEAI_CLIP_HEIGHT}]+ba/b[height<={SKATEAI_CLIP_HEIGHT}]/b",
+        "outtmpl": str(dest),
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 5,
+        "fragment_retries": 5,
+    }
+    print(f"Downloading source video {url} -> {dest.name}")
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.download([url])
+
+
+def _cut_clip(source: Path, dest: Path, start: float, end: float) -> None:
+    """Cut ``[start, end]`` seconds out of ``source`` with ffmpeg."""
+    import subprocess
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", f"{float(start):.3f}",
+        "-to", f"{float(end):.3f}",
+        "-i", str(source),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-c:a", "aac",
+        "-avoid_negative_ts", "make_zero",
+        str(dest),
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def download_skateai_clips(
+    raw_dir: Path | str = "data/raw/skateai",
+    limit: int | None = None,
+    max_sources: int | None = None,
+    force: bool = False,
+    keep_source: bool = False,
+) -> List[Path]:
+    """Cut the labelled SkateAI clips out of their BATB source videos.
+
+    Every clip belonging to a source video is cut from a single download, so the
+    449 clips cost 12 downloads rather than 449. Clips already on disk are
+    skipped unless ``force=True``, which makes the job resumable.
+
+    ``limit`` caps clips produced per source video and ``max_sources`` caps how
+    many source videos are touched (the first N in sorted URL order); together
+    they keep a smoke test to a single download. Requires ``ffmpeg`` on PATH.
+    """
+    raw = Path(raw_dir)
+    meta_path = raw / "metadata.csv"
+    if not meta_path.exists():
+        raise FileNotFoundError(f"{meta_path} not found; run fetch_skateai() first.")
+
+    meta = pd.read_csv(meta_path)
+    clips_root = raw / SKATEAI_VIDEOS_SUBDIR
+    source_root = raw / SKATEAI_SOURCES_SUBDIR
+    source_root.mkdir(parents=True, exist_ok=True)
+
+    groups = list(meta.groupby("video_url", sort=True))
+    if max_sources is not None:
+        groups = groups[:max_sources]
+
+    written: List[Path] = []
+    for url, group in groups:
+        pending = []
+        for row in group.itertuples(index=False):
+            clip_path = clips_root / row.video_title / row.video_file
+            if force or not clip_path.exists():
+                pending.append((clip_path, row.clip_start, row.clip_end))
+        if limit is not None:
+            pending = pending[:limit]
+        if not pending:
+            print(f"All {len(group)} clips already present for {url}; skipping")
+            continue
+
+        video_id = url.rstrip("/").split("=")[-1]
+        source_path = source_root / f"{video_id}.mp4"
+        if force or not source_path.exists():
+            _download_source_video(url, source_path)
+
+        for clip_path, start, end in pending:
+            _cut_clip(source_path, clip_path, start, end)
+            written.append(clip_path)
+        print(f"Cut {len(pending)} clips from {source_path.name}")
+
+        if not keep_source:
+            source_path.unlink(missing_ok=True)
+
+    return written
+
+
+def _skateai_published_splits(raw: Path) -> Dict[Tuple[str, str], str]:
+    """Map ``(video_title, video_file)`` to the split SkateAI's author published.
+
+    The upstream CSVs carry a bare ``video_file``, but that name repeats across
+    source videos (every battle folder has its own ``00001.mp4``), so we key on
+    the pair, which is unique and non-overlapping across the two files. Note the
+    published split stratifies on ``stance``/``landed`` only, so clips from one
+    battle land on both sides of it.
+    """
+    splits: Dict[Tuple[str, str], str] = {}
+    for filename, side in (("train_split.csv", "train"), ("validation_split.csv", "test")):
+        path = raw / filename
+        if not path.exists():
+            continue
+        df = pd.read_csv(path)
+        for video_title, video_file in zip(df["video_title"], df["video_file"]):
+            splits[(video_title, video_file)] = side
+    return splits
+
+
+def build_skateai_manifest(raw_dir: Path | str = "data/raw/skateai") -> pd.DataFrame:
+    """Build manifest rows for the SkateAI clips already on disk."""
+    raw = Path(raw_dir)
+    meta_path = raw / "metadata.csv"
+    if not meta_path.exists():
+        raise FileNotFoundError(f"{meta_path} not found; run fetch_skateai() first.")
+
+    meta = pd.read_csv(meta_path)
+    clips_root = raw / SKATEAI_VIDEOS_SUBDIR
+    published = _skateai_published_splits(raw)
+    holdout = generate_group_disjoint_split(meta, group_col="video_url")
+
+    rows = []
+    missing = 0
+    for index, row in meta.iterrows():
+        clip_path = clips_root / row["video_title"] / row["video_file"]
+        if not clip_path.exists():
+            missing += 1
+            continue
+
+        frames, fps, w, h, dur = inspect_video_metadata(clip_path)
+        # SkateAI publishes both a jargon name and the decomposed rotations. The
+        # rotations are the stable key -- its 31 names and 31 triples are in exact
+        # 1:1 correspondence -- so derive the canonical label from them and keep
+        # the upstream spelling in label_source for provenance. The scope
+        # guardrail then cross-checks the two paths, which is what would catch a
+        # clip whose name and components disagree.
+        rotation = Rotation.from_components(
+            str(row["flip_type"]).strip().lower(),
+            row["flip_number"],
+            str(row["board_rotation_type"]).strip().lower(),
+            row["board_rotation_number"],
+            str(row["body_rotation_type"]).strip().lower(),
+            row["body_rotation_number"],
+        )
+        label = default_taxonomy().label_from_rotation(rotation)
+
+        rows.append(_manifest_row(
+            clip_id=f"skateai_{row['video_title']}_{Path(row['video_file']).stem}".lower(),
+            dataset="skateai",
+            file_path=str(clip_path).replace("\\", "/"),
+            sha256=compute_sha256(clip_path),
+            label=label,
+            label_source=str(row["trick_name"]).strip().lower(),
+            license=SKATEAI_LICENSE,
+            # SkateAI never records which of the two competitors performed a clip,
+            # so no real person ID exists at clip level.
+            skater_id="unknown",
+            skater_id_source="not_published_per_clip",
+            camera_id=f"cam_{row['video_title']}",
+            duration_sec=round(dur, 2),
+            frame_count=frames,
+            fps=round(fps, 1),
+            width=w,
+            height=h,
+            split_published=published.get((row["video_title"], row["video_file"]), "train"),
+            split_holdout=holdout.loc[index],
+            split_source="source_video_url",
+            stance=str(row["stance"]).strip().lower(),
+            landed="true" if bool(row["landed"]) else "false",
+            source_video_url=row["video_url"],
+            source_video_title=row["video_title"],
+            source_group=row["video_source"],
+            clip_start=float(row["clip_start"]),
+            clip_end=float(row["clip_end"]),
+            **rotation.components(),
+        ))
+
+    if missing:
+        print(
+            f"Skipped {missing} SkateAI clips that are not on disk yet "
+            "(run download_skateai_clips())."
+        )
+    return pd.DataFrame(rows, columns=MANIFEST_COLUMNS)
+
+
+def build_manifest(
+    raw_dir: Path | str = "data/raw/skateboardml",
+    out_csv: Path | str = "data/manifest.csv",
+    skateai_dir: Path | str = "data/raw/skateai",
+    datasets: Tuple[str, ...] = ("skateboardml", "skateai"),
+) -> pd.DataFrame:
+    """Build the combined manifest and save it to CSV.
+
+    Datasets whose raw files are missing are skipped with a message, so a fresh
+    checkout with only SkateboardML extracted still yields a usable manifest.
+
+    Raises :class:`~skateid.taxonomy.ScopeError` when any row falls outside the
+    flatground vocabulary, so the guardrail of plan section 5 is enforced on the
+    way in rather than only in CI.
+    """
+    frames: List[pd.DataFrame] = []
+    for name in datasets:
+        try:
+            if name == "skateboardml":
+                frames.append(build_skateboardml_manifest(raw_dir))
+            elif name == "skateai":
+                frames.append(build_skateai_manifest(skateai_dir))
+            else:
+                raise ValueError(f"Unknown dataset '{name}'")
+        except FileNotFoundError as exc:
+            print(f"Skipping dataset '{name}': {exc}")
+
+    non_empty = [frame for frame in frames if not frame.empty]
+    if not non_empty:
+        raise FileNotFoundError(
+            f"No clips found for any of {', '.join(datasets)}; run 'skateid fetch' first."
+        )
+
+    df = pd.concat(non_empty, ignore_index=True)
+
+    # The flatground guardrail (plan section 5) is enforced here, at ingestion:
+    # an off-allowlist label, an empty component, or a row whose rotations
+    # contradict its own label is rejected before it can reach data/manifest.csv.
+    default_taxonomy().validate_or_raise(df)
+
+    out_path = Path(out_csv)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False)
     return df
+
+
 
