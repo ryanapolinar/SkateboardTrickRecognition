@@ -145,7 +145,13 @@ def eval_cmd(args: argparse.Namespace) -> int:
     print(f"Accuracy:  {metrics['accuracy']:.4f}")
     print(f"Macro F1:  {metrics['macro_f1']:.4f}")
     print("\nConfusion Matrix:")
-    print(format_confusion_matrix(metrics["confusion_matrix"], metrics["labels"]))
+    # --max-labels 0 means "print every class", which format_confusion_matrix
+    # spells as None.
+    print(format_confusion_matrix(
+        metrics["confusion_matrix"],
+        metrics["labels"],
+        max_labels=args.max_labels or None,
+    ))
     print("\nClassification Report:")
     print(metrics["report"])
     return 0
@@ -312,6 +318,13 @@ def main() -> int:
         help="Restrict to one dataset",
     )
     eval_p.add_argument("--checkpoint-dir", default="checkpoints", help="Directory where model checkpoints are saved")
+    eval_p.add_argument(
+        "--max-labels",
+        type=int,
+        default=12,
+        help="Show at most N classes in the confusion matrix, folding the rest into "
+        "(other). 0 prints every class (very wide past ~10 classes).",
+    )
 
     validate_p = subparsers.add_parser(
         "validate", help="Check a manifest against the flatground scope guardrail"

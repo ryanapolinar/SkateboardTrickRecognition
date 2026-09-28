@@ -8,7 +8,11 @@ import pytest
 
 import skateid
 from skateid.data import generate_group_disjoint_split
-from skateid.eval import MajorityClassBaseline, evaluate_predictions, format_confusion_matrix
+from skateid.eval import (
+    MajorityClassBaseline,
+    evaluate_predictions,
+    format_confusion_matrix,
+)
 from skateid.taxonomy import ROTATION_COLUMNS, Rotation, ScopeError, Taxonomy
 
 
@@ -307,6 +311,48 @@ def test_stance_mirror_is_a_bijection_over_the_whole_vocabulary():
     self_mirrors = sorted(name for name, hits in partners.items() if name in hits)
     assert self_mirrors == ["ollie"]
     assert taxonomy.name_for_mirrored(Rotation(flip=2)) == "double_heelflip"
+
+
+def test_confusion_matrix_folds_low_support_classes_and_stays_readable():
+    """M0's named deliverable is 'prints a confusion matrix'; it has to be readable.
+
+    A 23-class matrix is ~576 characters wide, which no terminal shows in one
+    piece, so the table keeps the highest-support classes and folds the rest into
+    an (other) row and column, saying so. The fold must preserve the totals.
+    """
+    # 14 classes, descending support, one false positive each.
+    labels = [f"c{i:02d}" for i in range(14)]
+    cm = [[0] * 14 for _ in range(14)]
+    for i, support in enumerate(range(14, 0, -1)):
+        cm[i][i] = support
+        cm[i][13] = 1
+    total = sum(sum(row) for row in cm)
+
+    folded = format_confusion_matrix(cm, labels, max_labels=5)
+    assert "c00" in folded and "c13" not in folded, "keeps the highest-support class"
+    assert "9 lower-support class(es) folded" in folded
+    assert "(other x9)" in folded
+
+    # The visible numbers must still add up to the whole matrix, so the (other)
+    # row and column really do carry the folded classes. Drop the first two lines
+    # (header, rule) and the last (the fold note). Row labels can contain spaces
+    # ("(other x9)"), so read the last 6 tokens rather than skipping by count.
+    body = folded.splitlines()[2:-1]
+    assert len(body) == 6, "5 kept classes plus the (other) row"
+    visible = [int(token) for line in body for token in line.split()[-6:]]
+    assert sum(visible) == total, (sum(visible), total)
+
+    # max_labels=None prints everything, with no fold note.
+    full = format_confusion_matrix(cm, labels, max_labels=None)
+    assert "c13" in full and "folded" not in full
+    assert len(full.splitlines()) == len(labels) + 2
+
+    # A matrix that already fits is printed untouched.
+    small = format_confusion_matrix([[1, 0], [0, 1]], ["a", "b"], max_labels=5)
+    assert "folded" not in small and len(small.splitlines()) == 4
+
+    # And it is narrow enough to read.
+    assert max(len(line) for line in folded.splitlines()) < 200
 
 
 def test_guardrail_rejects_a_riding_direction_used_as_a_stance():

@@ -52,13 +52,68 @@ def evaluate_predictions(
     }
 
 
-def format_confusion_matrix(cm: List[List[int]], labels: List[str]) -> str:
-    """Format confusion matrix as a clean ASCII table."""
-    col_width = max(max(len(label) for label in labels), 8) + 2
-    title_cell = "True \\ Pred"
-    header = f"{title_cell:<{col_width}}" + "".join(f"{lbl:>{col_width}}" for lbl in labels)
+def format_confusion_matrix(
+    cm: List[List[int]],
+    labels: List[str],
+    max_labels: Optional[int] = 12,
+) -> str:
+    """Format a confusion matrix as a readable ASCII table.
+
+    A full 23-class matrix is ~576 characters wide, which no terminal shows in
+    one piece, and M0's exit-gate deliverable is precisely "prints a confusion
+    matrix". So beyond ``max_labels`` classes the table keeps the
+    highest-support ones and collapses the remainder into a single ``(other)``
+    row and column, stating how many were folded in. Nothing is hidden silently:
+    the per-class numbers for *every* class are still in the classification
+    report printed alongside, and the full matrix is written to the metrics JSON
+    when ``--out`` is used.
+
+    ``max_labels=None`` prints every class, which is what you want for a 2-class
+    problem or when dumping to a file.
+    """
+    support = [sum(row) for row in cm]
+    total = sum(support)
+
+    if max_labels is None or len(labels) <= max_labels:
+        keep = list(range(len(labels)))
+        folded = 0
+    else:
+        # Highest support first, then re-sort ascending for a stable display order.
+        order = sorted(range(len(labels)), key=lambda i: (-support[i], labels[i]))
+        keep = sorted(order[:max_labels])
+        folded = len(labels) - len(keep)
+
+    kept_set = set(keep)
+    dropped = [i for i in range(len(labels)) if i not in kept_set]
+
+    # Cells for the kept rows/columns come straight from the matrix. The (other)
+    # row and column are computed by subtraction, so the grand total is preserved
+    # and the table still adds up.
+    rows = []
+    for i in keep:
+        kept_cells = [cm[i][j] for j in keep]
+        rest = (sum(cm[i]) - sum(kept_cells)) if dropped else None
+        rows.append(kept_cells + ([rest] if dropped else []))
+
+    if dropped:
+        other_row = [sum(cm[i][j] for i in dropped) for j in keep]
+        other_row.append(sum(sum(cm[i]) for i in dropped) - sum(other_row))
+        rows.append(other_row)
+
+    shown = [labels[i] for i in keep]
+    other_label = f"(other x{folded})" if folded else None
+    row_labels = list(shown) + ([other_label] if folded else [])
+    column_labels = list(shown) + ([other_label] if folded else [])
+
+    width = max(max(len(label) for label in column_labels + row_labels), 8) + 2
+    header = f"{'True \\ Pred':<{width}}" + "".join(f"{lbl:>{width}}" for lbl in column_labels)
     lines = [header, "-" * len(header)]
-    for i, row in enumerate(cm):
-        row_str = f"{labels[i]:<{col_width}}" + "".join(f"{val:>{col_width}}" for val in row)
-        lines.append(row_str)
+    for label, row in zip(row_labels, rows):
+        lines.append(f"{label:<{width}}" + "".join(f"{val:>{width}}" for val in row))
+
+    if folded:
+        lines.append(
+            f"({folded} lower-support class(es) folded into (other); "
+            f"{total} samples total, all classes in the report below)"
+        )
     return "\n".join(lines)
