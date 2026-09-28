@@ -1,8 +1,10 @@
 # Skateboard Trick Recognition — Plan v0.3.0 (2026, consolidated)
 
-> Single integrated plan. **Supersedes `plan-v0.2.md` and `plan-v0.2.1.md`.**
-> Adds the **output & quantization spec** (predict signed angles, quantize to a trick at
-> the label layer), makes the **web page the default HCI**, and makes **flatground-only**
+> Single integrated plan. Supersedes the earlier `plan-v0.1` / `v0.2` / `v0.2.1`
+> drafts, which were removed once v0.3.0 absorbed them; they remain in git history
+> (`3f910da`) if ever needed. Adds the **output & quantization spec** (predict signed
+> angles, quantize to a trick at the label layer), makes the **web page the default HCI**,
+> and makes **flatground-only**
 > a hard, enforced scope. Decisions folded in: shuvit/pop-shuvit merged into one label;
 > airtime is a diagnostic feature, not a head; `landed` suppresses confident-wrong answers;
 > **stance is a user input (goofy/regular), not a prediction** — it sets the sign
@@ -384,7 +386,7 @@ skateid "clips/*.mp4"            # batch
 
 ```
 SkateboardTrickRecognition/
-  plan-v0.1.md  plan-v0.2.md  plan-v0.2.1.md  plan-v0.3.0.md   README.md   pyproject.toml (uv, pinned)
+  plan-v0.3.0.md   README.md   pyproject.toml (uv, pinned)
   data/
     manifest.csv                 # path,label,flip*,board_*,body_*,stance,landed,source,license,split
     flatground_allowlist.csv     # approved labels + component combos
