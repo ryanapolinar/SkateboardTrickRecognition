@@ -303,7 +303,18 @@ fs<->bs — free signs via §4.3), time-jitter/crop, Gaussian noise on keypoints
   the object.
 - **A mirrored world is a second valid world.** We mirror clips for augmentation (labels swap
   too), so the model sees both goofy and regular reads regardless of the toggle — fine, and
-  encouraged.
+  encouraged. **Caveat added v0.3.1: mirroring does not close.** Negating all three axes
+  lands 6 of the 35 rotation-expressible names on a trick no dataset publishes (a frontside
+  biggerspin heelflip, a frontside tre double flip, ...). Those clips remain valid *input*
+  augmentation; there is simply no label to swap to. `Rotation.mirrored()` and
+  `Taxonomy.name_for_mirrored()` report this rather than inventing a name.
+- **The sign frame is an input, not a property of the trick.** A kickflip is +360 for a
+  regular rider and -360 for a goofy one; the stance normalisation above is what makes one
+  stored value serve both. The manifest keeps `stance_published` (riding direction:
+  regular/switch/fakie/nollie — provenance only, cannot fix the frame) separate from
+  `stance_input` (the goofy/regular toggle, empty until M1). The guardrail rejects a riding
+  direction placed in `stance_input`, because that is not a schema error but a silent
+  kick<->heel and fs<->bs swap across the whole dataset.
 
 ---
 

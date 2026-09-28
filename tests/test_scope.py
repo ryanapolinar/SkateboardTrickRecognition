@@ -109,7 +109,7 @@ def test_manifest_schema_and_values():
         "license",
         "skater_id", "skater_id_source", "camera_id", "duration_sec",
         "frame_count", "fps", "width", "height", "split_published",
-        "split_holdout", "split_source", "stance", "landed",
+        "split_holdout", "split_source", "stance_published", "stance_input", "landed",
         "flip_type", "flip_number", "board_rotation_type",
         "board_rotation_number", "body_rotation_type", "body_rotation_number",
         "source_video_url", "source_video_title", "source_group",
@@ -243,6 +243,89 @@ def test_guardrail_rejects_a_clip_whose_name_and_components_disagree():
     assert any("resolves to" in violation for violation in violations)
 
 
+# --- stance: the sign frame is a separate input (plan sections 3 and 7) -----
+
+
+def test_mirroring_a_rotation_is_the_geometric_mirror():
+    """A kickflip is +360 for a regular rider and -360 for a goofy one."""
+    kickflip = Rotation(flip=1, board_spin=0, body_spin=0)
+    assert kickflip.mirrored() == Rotation(flip=-1, board_spin=0, body_spin=0)
+    assert Taxonomy.load().label_from_rotation(kickflip.mirrored()) == "heelflip"
+
+    # All three axes flip, not just the board: the body yaw mirrors too.
+    bigspin = Rotation(flip=0, board_spin=2, body_spin=1)
+    assert bigspin.mirrored() == Rotation(flip=0, board_spin=-2, body_spin=-1)
+
+    # Mirroring twice is the identity, so the operation is an involution.
+    for rotation in (Rotation(2, -1, 1), Rotation(-1, 2, 0), Rotation()):
+        assert rotation.mirrored().mirrored() == rotation
+
+
+def test_mirror_does_not_close_and_says_so():
+    """Documented limitation: 6 of 35 names have no mirrored partner.
+
+    Their mirror is a real trick (a frontside biggerspin heelflip) that no
+    dataset publishes, so the dictionary cannot name it. This is the caveat on
+    the plan's mirror-with-label-swap augmentation.
+    """
+    taxonomy = Taxonomy.load()
+    closure = taxonomy.mirror_closure()
+
+    assert set(closure) == {"named", "unmirrored"}
+    assert len(closure["named"]) + len(closure["unmirrored"]) == len(
+        taxonomy.dictionary.expressible_names()
+    )
+    assert len(closure["unmirrored"]) == 6, closure["unmirrored"]
+    assert "bs_biggerspin_kickflip" in closure["unmirrored"]
+    # Named partners are the expected skate-vocabulary pairs.
+    assert taxonomy.name_for_mirrored(Rotation(flip=1)) == "heelflip"
+    assert taxonomy.name_for_mirrored(Rotation(flip=1, board_spin=2)) == "laser_flip"
+    # ollie is the one self-mirror, which is correct: mirroring an ollie is an ollie.
+    assert taxonomy.name_for_mirrored(Rotation()) == "ollie"
+
+
+def test_guardrail_rejects_a_riding_direction_used_as_a_stance():
+    """The dangerous error is a plausible-looking wrong value, not a missing one."""
+    df = pd.read_csv("data/manifest.csv")
+    taxonomy = Taxonomy.load()
+
+    # An all-empty column round-trips as float64/NaN, so cast before assigning.
+    doctored = df.copy()
+    doctored["stance_input"] = doctored["stance_input"].fillna("").astype(object)
+    doctored.loc[doctored.index[0], "stance_input"] = "fakie"
+    violations = taxonomy.validate_frame(doctored)
+    assert any("stance_input must be one of" in v for v in violations)
+    assert any("riding directions" in v for v in violations)
+
+    # 'regular' is legal in both vocabularies, so it must not trip the leak check.
+    ok = df.copy()
+    ok["stance_input"] = ok["stance_input"].fillna("").astype(object)
+    ok.loc[ok.index[0], "stance_input"] = "regular"
+    assert not any("stance" in v for v in taxonomy.validate_frame(ok))
+
+    # A valid toggle is accepted.
+    goofy = df.copy()
+    goofy["stance_input"] = goofy["stance_input"].fillna("").astype(object)
+    goofy.loc[goofy.index[0], "stance_input"] = "goofy"
+    assert not any("stance" in v for v in taxonomy.validate_frame(goofy))
+
+
+def test_manifest_keeps_published_riding_direction_apart_from_stance():
+    from skateid.taxonomy import PUBLISHED_RIDING_VALUES
+
+    df = pd.read_csv("data/manifest.csv")
+
+    # SkateAI publishes riding directions; SkateboardML publishes nothing at all.
+    skateai = df[df["dataset"] == "skateai"]
+    assert set(skateai["stance_published"]) <= set(PUBLISHED_RIDING_VALUES)
+    assert "fakie" in set(skateai["stance_published"])
+    assert df[df["dataset"] == "skateboardml"]["stance_published"].isna().all()
+
+    # stance_input is empty for every row until M1 can resolve the toggle. It reads
+    # back as NaN because an all-empty CSV column has no string dtype.
+    assert df["stance_input"].isna().all()
+
+
 def test_group_disjoint_split_never_splits_a_group():
     df = pd.DataFrame({"group": ["a"] * 4 + ["b"] * 4 + ["c"] * 4 + ["d"] * 4})
     split = generate_group_disjoint_split(df, group_col="group", test_size=0.25, seed=0)
@@ -271,6 +354,9 @@ def test_skateai_labels_are_consistent():
 
     assert meta["trick_name"].notna().all()
     assert set(meta["stance"].unique()) <= {"regular", "switch", "fakie", "nollie"}
+    # Those are riding directions, NOT goofy/regular stances: none of them can
+    # fix the sign frame, which is why the manifest keeps them apart.
+    assert "goofy" not in set(meta["stance"].unique())
     assert set(meta["flip_type"].unique()) <= {"none", "kickflip", "heelflip"}
     assert set(meta["landed"].astype(bool).unique()) <= {True, False}
 

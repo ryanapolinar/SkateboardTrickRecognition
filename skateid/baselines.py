@@ -509,17 +509,39 @@ VLM_PROMPT_TEMPLATE = (
     "You are shown {count} evenly spaced frames, in time order, from one short video "
     "clip of a single flatground skateboard trick. There is no ramp, rail, ledge or "
     "obstacle in the clip.\n"
-    "The skateboarder is riding {stance} stance.\n"
+    "The skateboarder is riding{riding}.{stance_clause}\n"
     "Answer with exactly one name from this list and nothing else:\n"
     "{options}\n"
     "If no flatground trick is recognisable, answer 'unknown'."
 )
 
 
-def build_vlm_prompt(taxonomy: Taxonomy, stance: str = "regular") -> str:
-    """The B2 prompt. Names come from the registry, never from hard-coded strings."""
+def build_vlm_prompt(
+    taxonomy: Taxonomy,
+    stance_input: str = "",
+    stance_published: str = "",
+) -> str:
+    """The B2 prompt. Names come from the registry, never from hard-coded strings.
+
+    The two stance sources are reported differently on purpose. A published riding
+    direction is a fact about the clip, so it is stated directly. The resolved
+    goofy/regular stance is a *sign-frame* declaration, so naming it is meaningful:
+    it tells the model which way "kick" and "backside" are being read, which is
+    precisely the failure this project cares about. When it is empty (it is,
+    until M1) the prompt says so instead of implying a default.
+    """
     options = ", ".join(taxonomy.dictionary.expressible_names())
-    return VLM_PROMPT_TEMPLATE.format(count="{count}", stance=stance, options=options)
+    riding = f" {stance_published}" if stance_published else ""
+    if stance_input:
+        clause = (
+            f" Read the trick as a {stance_input}-stance rider, so 'kick' and 'backside'"
+            " are from that foot position."
+        )
+    else:
+        clause = " Stance is not given; answer using the rider's likely foot position."
+    return VLM_PROMPT_TEMPLATE.format(
+        count="{count}", riding=riding, stance_clause=clause, options=options
+    )
 
 
 @dataclasses.dataclass
@@ -805,8 +827,11 @@ def run_b2(
         if not clip.exists():
             absent += 1
             continue
-        stance = str(getattr(row, "stance", "") or "regular").lower() or "regular"
-        prompt = build_vlm_prompt(tax, stance=stance)
+        prompt = build_vlm_prompt(
+            tax,
+            stance_input=str(getattr(row, "stance_input", "") or "").strip().lower(),
+            stance_published=str(getattr(row, "stance_published", "") or "").strip().lower(),
+        )
         images = frames_to_jpegs(_evenly_pick(sample_frames(clip, count=frame_count), frames_per_clip))
         try:
             raw = model.answer(prompt, images)

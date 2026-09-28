@@ -180,8 +180,8 @@ carrying a `note` in `tricks.json` explaining how it is represented instead:
 
 | Name | Why there is no triple |
 |---|---|
-| `half_cab` | a fakie backside 180 — same triple as `bs_180`, recovered from `(stance, label)` |
-| `full_cab` | a fakie backside 360 — same triple as `bs_360` |
+| `half_cab` | a fakie backside 180 — same triple as `bs_180`, recovered from `(stance_published, label)` |
+| `full_cab` | a fakie backside 360 — same triple as `bs_360`, recovered from `(stance_published, label)` |
 | `impossible` | the board wraps vertically around the front foot, about an axis the 3-axis model lacks |
 | `none` | absence of a trick; `(0,0,0)` is already taken by `ollie`, so it needs a separate no-trick gate |
 
@@ -303,6 +303,54 @@ Two things worth reading off this table:
 All of it is still far below useful: 4x a 0.0101 floor on a 22-class problem is a
 correctness signal, not a capability. `motion_stats` and the `mock` VLM backend exist
 to exercise the pipeline; their numbers are plumbing checks, never results.
+
+## Stance: the sign frame is a separate input
+
+A kickflip is **+360 for a regular rider and −360 for a goofy one.** Pop shuvit is
++180 regular, −180 goofy. That dependency is real, and it is why the sign
+convention cannot be stated without a stance.
+
+It does **not** belong in the dictionary, because of *where* it lives in the
+pipeline. The stored triple is already in the **stance-normalized frame**: the
+feature extractor (plan §7) sign-flips the x-axis per the resolved goofy/regular
+toggle, and only then is the triple looked up. One stored value therefore serves
+both stances, which keeps `label_from_rotation()` a pure function of the triple
+and makes mirror-with-label-swap a free augmentation.
+
+The manifest keeps the two concepts in **separate columns**:
+
+| Column | Values | Meaning |
+|---|---|---|
+| `stance_published` | `regular`, `switch`, `fakie`, `nollie` | riding direction / pop type, exactly as the dataset published it. **Provenance only** — none of these can fix the sign frame, and `fakie` is a direction, not a foot forward |
+| `stance_input` | `regular`, `goofy`, or empty | the resolved goofy/regular toggle that selects the sign frame |
+
+`stance_input` is **empty on every row today**, because there is no feature
+extractor yet (M1). That is the honest state: guessing it wrong silently mirrors
+every sign, swapping kick↔heel and fs↔bs across the whole dataset, so an empty
+value is strictly better than a plausible-looking wrong one.
+
+The guardrail enforces this. `stance_input` must be `regular`/`goofy`/empty, and a
+**riding direction copied into it is a separate, named violation** — because that
+mistake is not a schema error, it is a silent sign flip on the data.
+
+`Rotation.mirrored()` exposes the operation (negating all three axes *is* the
+geometric mirror), and `Taxonomy.name_for_mirrored()` names the result or returns
+`None` rather than inventing a name.
+
+### Mirroring does not close — 6 of 35 names
+
+Worth knowing before relying on mirror augmentation: the mirror of a trick need
+not be a *named* trick.
+
+| | |
+|---|---|
+| Named (29) | kickflip↔heelflip, pop_shuvit↔fs_shuvit, tre_flip↔laser_flip, bs_180↔fs_180, bigflip↔bigheel, … |
+| Unnamed (6) | `bs_biggerspin_kickflip`, `bs_bigspin_inward_heelflip`, `tre_double_flip`, `hard_double_flip`, `bs_180_double_kickflip`, `fs_180_double_kickflip` |
+
+Their mirrors are real tricks — a frontside biggerspin heelflip, a frontside tre
+double flip — that **no dataset publishes**, so the dictionary cannot name them.
+Mirroring such a clip is still valid *input* augmentation; there is just no label
+to swap to. `ollie` is the one self-mirror, which is correct.
 
 ## Baseline floor (B0)
 

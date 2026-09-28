@@ -57,7 +57,16 @@ MANIFEST_COLUMNS = [
     "split_source",
     # Compositional trick metadata. Populated for datasets that publish it
     # (SkateAI); left empty for SkateboardML, which only ships a class folder.
-    "stance",
+    # Riding direction / pop type exactly as the upstream dataset published it
+    # (SkateAI: regular, switch, fakie, nollie). NOT the goofy/regular stance that
+    # fixes the sign convention: none of these values can be converted into a
+    # stance, and `fakie` in particular is a riding direction, not a foot
+    # forward. It is kept for provenance and for stratifying splits.
+    "stance_published",
+    # The resolved goofy/regular toggle that selects the sign frame (plan
+    # section 3). Empty until M1's feature extractor exists, which is why the
+    # guardrail refuses to derive a *new* name from rotations while it is empty.
+    "stance_input",
     "landed",
     "flip_type",
     "flip_number",
@@ -76,7 +85,8 @@ MANIFEST_COLUMNS = [
 # Columns that are legitimately absent for some datasets. Empty string for text,
 # NaN for numbers, so pandas keeps numeric columns numeric across datasets.
 _OPTIONAL_DEFAULTS: Dict[str, object] = {
-    "stance": "",
+    "stance_published": "",
+    "stance_input": "",
     "landed": "",
     "flip_type": "",
     "flip_number": float("nan"),
@@ -542,7 +552,13 @@ def build_skateai_manifest(raw_dir: Path | str = "data/raw/skateai") -> pd.DataF
             split_published=published.get((row["video_title"], row["video_file"]), "train"),
             split_holdout=holdout.loc[index],
             split_source="source_video_url",
-            stance=str(row["stance"]).strip().lower(),
+            # Provenance only: a riding direction / pop type, NOT the goofy/regular
+            # stance that fixes the sign convention.
+            stance_published=str(row["stance"]).strip().lower(),
+            # Stays empty until M1 supplies a feature extractor that can resolve
+            # the toggle. An honest gap beats a guessed one: guessing wrong flips
+            # every sign, so kickflip and heelflip swap.
+            stance_input="",
             landed="true" if bool(row["landed"]) else "false",
             source_video_url=row["video_url"],
             source_video_title=row["video_title"],

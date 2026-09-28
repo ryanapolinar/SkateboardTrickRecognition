@@ -73,6 +73,16 @@ _AXES: Tuple[Tuple[str, str, str], ...] = (
     ("body_spin", "body_rotation_type", "body_rotation_number"),
 )
 
+#: Stance is the goofy/regular toggle that fixes the sign convention (plan section 3).
+#: It is *not* the riding direction a dataset publishes, which is why the manifest
+#: keeps the two in separate columns.
+STANCE_VALUES: Tuple[str, ...] = ("regular", "goofy")
+
+#: What a dataset may publish instead of the goofy/regular toggle: riding
+#: directions and pop types. None of these can be converted into a stance, which
+#: is exactly why `stance_published` must never feed the sign convention.
+PUBLISHED_RIDING_VALUES: Tuple[str, ...] = ("regular", "switch", "fakie", "nollie")
+
 _NEGATIVE_TYPE: Mapping[str, str] = {
     "flip": "heelflip",
     "board_spin": "frontside",
@@ -132,11 +142,33 @@ def join_axis(axis: str, type_value: str, number: object) -> int:
 
 @dataclass(frozen=True, order=True)
 class Rotation:
-    """A quantized ``(flip, board_spin, body_spin)`` triple in the stance frame."""
+    """A quantized ``(flip, board_spin, body_spin)`` triple in the stance frame.
+
+    Stance is deliberately **not** a field of the triple. It is a separate input
+    that selects the frame (plan sections 3 and 7): a kickflip is +360 for a
+    regular rider and -360 for a goofy one, and the stance normalisation in the
+    feature extractor is what makes a single stored value serve both. Keeping
+    stance out of the key is what lets one clip's mirror cover the other stance
+    for free, and what keeps :meth:`name_for` a pure function of the triple.
+
+    Use :meth:`mirrored` to move between the two stances' raw readings.
+    """
 
     flip: int = 0
     board_spin: int = 0
     body_spin: int = 0
+
+    def mirrored(self) -> "Rotation":
+        """The same trick as read by a rider in the opposite stance.
+
+        Negating all three axes is exactly the geometric mirror (plan section 7
+        sign-flips the x-axis), and it is what turns a regular rider's kickflip
+        (+360) into a goofy rider's (-360). Note that mirroring need not land on
+        a *named* trick: the mirror of ``bs_biggerspin_kickflip`` is a frontside
+        biggerspin heelflip, which no dataset publishes. :func:`Taxonomy.
+        name_for_mirrored` reports that rather than inventing a name.
+        """
+        return Rotation(-self.flip, -self.board_spin, -self.body_spin)
 
     def components(self) -> Dict[str, object]:
         """The six manifest columns implied by this triple."""
@@ -430,6 +462,29 @@ class Taxonomy:
             )
         return rotation
 
+    def name_for_mirrored(self, rotation: Rotation) -> Optional[str]:
+        """Name for the same trick read by a rider in the opposite stance.
+
+        Returns ``None`` when the mirror is not a named trick in this
+        dictionary, rather than guessing. **Mirroring does not close**: 6 of the
+        35 rotation-expressible names mirror to a partner that no dataset
+        publishes (a frontside biggerspin heelflip, a frontside tre double flip,
+        ...). This is the documented caveat on the plan's mirror-with-label-swap
+        augmentation -- mirroring such a clip is still valid *input*
+        augmentation, but its swapped label has no name to land on.
+        """
+        return self.dictionary.label_from_rotation(rotation.mirrored())
+
+    def mirror_closure(self) -> Dict[str, object]:
+        """Which names survive a stance mirror, for the docs and the tests."""
+        named: List[str] = []
+        unmirrored: List[str] = []
+        for name in self.dictionary.expressible_names():
+            rotation = self.dictionary.rotation_for_label(name)
+            partner = self.dictionary.label_from_rotation(rotation.mirrored())
+            (named if partner is not None else unmirrored).append(name)
+        return {"named": named, "unmirrored": unmirrored}
+
     # --- the guardrail -----------------------------------------------------
 
     def _row_violations(self, row: Mapping[str, object], where: str) -> List[str]:
@@ -471,13 +526,53 @@ class Taxonomy:
                 )
         return problems
 
+    def _stance_violations(self, frame: pd.DataFrame) -> List[str]:
+        """Checks on the two distinct stance columns.
+
+        The dangerous failure is not a missing value but a *wrong* one: copying a
+        published riding direction into the goofy/regular toggle is not a schema
+        error, it silently mirrors every sign, swapping kick<->heel and fs<->bs
+        on every clip. That gets its own check.
+        """
+        problems: List[str] = []
+
+        if "stance_published" in frame.columns:
+            published = frame["stance_published"].fillna("").astype(str).str.strip().str.lower()
+            published = {value for value in published if value}
+            unknown = published - set(PUBLISHED_RIDING_VALUES)
+            if unknown:
+                problems.append(
+                    f"stance_published has values outside {list(PUBLISHED_RIDING_VALUES)}: "
+                    f"{sorted(unknown)}"
+                )
+
+        if "stance_input" not in frame.columns:
+            problems.append("manifest is missing the stance_input column")
+            return problems
+
+        stance = frame["stance_input"].fillna("").astype(str).str.strip().str.lower()
+        filled = {value for value in stance if value}
+        bad = sorted(filled - set(STANCE_VALUES))
+        if bad:
+            problems.append(
+                f"stance_input must be one of {list(STANCE_VALUES)} or empty, found {bad}. "
+                "It is the goofy/regular toggle, not a riding direction: fakie/switch/nollie "
+                "cannot fix the sign frame."
+            )
+        leaked = sorted((filled & set(PUBLISHED_RIDING_VALUES)) - {"regular"})
+        if leaked:
+            problems.append(
+                f"stance_input contains riding directions {leaked}; using one as the stance "
+                "would flip kick<->heel and fs<->bs on every clip."
+            )
+        return problems
+
     def validate_frame(self, frame: pd.DataFrame, max_report: int = 12) -> List[str]:
         """Return every way ``frame`` breaks the scope guardrail (empty when clean)."""
+        violations: List[str] = self._stance_violations(frame)
         missing = [column for column in ("label", *ROTATION_COLUMNS) if column not in frame.columns]
         if missing:
-            return [f"manifest is missing columns {missing}"]
-
-        violations: List[str] = []
+            return violations + [f"manifest is missing columns {missing}"]
 
         off_list = sorted(set(frame["label"].astype(str)) - set(self.allowlist.canonical_names()))
         if off_list:
