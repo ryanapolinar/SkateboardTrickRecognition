@@ -195,7 +195,7 @@ produced by the rotation outputs. Every rotation (flip/board/spin) can happen on
 - `data/tricks.json` — the **rotation dictionary**: canonical name ↔ the three rotations
   (§4). 39 entries, 35 of which have a triple. This is the authority: a row's `label` is
   *derived* from its triple, not read from a name.
-- `data/flatground_allowlist.csv` — the **name registry**: 39 canonical names + 121
+- `data/flatground_allowlist.csv` — the **name registry**: 45 canonical names + 135
   aliases (every upstream SkateAI spelling included). Aliases are not allowed to collide.
 - `skateid/taxonomy.py` — loads both, and refuses to construct a `Taxonomy` if they
   disagree, so a trick can never be half-added.
@@ -210,7 +210,7 @@ produced by the rotation outputs. Every rotation (flip/board/spin) can happen on
 > **Corrected in v0.3.1.** This section previously cited "SkateAI's 58" names. The
 > ingested metadata has **31 distinct trick names** and **73 distinct
 > (stance, trick) pairs**; 58 is neither, and the number has been removed. The v1
-> vocabulary is 39 canonical names, not 58.
+> vocabulary is 45 canonical names, not 58.
 >
 > The 4 allowlisted-but-**not rotation-expressible** names are recorded in
 > `tricks.json` with a `note` explaining how they are represented instead:
@@ -303,11 +303,13 @@ fs<->bs — free signs via §4.3), time-jitter/crop, Gaussian noise on keypoints
   the object.
 - **A mirrored world is a second valid world.** We mirror clips for augmentation (labels swap
   too), so the model sees both goofy and regular reads regardless of the toggle — fine, and
-  encouraged. **Caveat added v0.3.1: mirroring does not close.** Negating all three axes
-  lands 6 of the 35 rotation-expressible names on a trick no dataset publishes (a frontside
-  biggerspin heelflip, a frontside tre double flip, ...). Those clips remain valid *input*
-  augmentation; there is simply no label to swap to. `Rotation.mirrored()` and
-  `Taxonomy.name_for_mirrored()` report this rather than inventing a name.
+  encouraged. **Closed in v0.3.1: the mirror map is now a bijection.** Negating all three
+  axes initially left 6 of 35 names landing on a trick no dataset publishes (a frontside
+  biggerspin heelflip, a frontside tre double flip, ...). Their 6 partners were added to
+  `tricks.json` with notes saying no ingested data publishes them; they exist so the
+  augmentation is total. Every one of the 41 rotation-expressible names now mirrors to
+  exactly one name, and no two collide on a partner, so label-swap is safe everywhere.
+  `ollie` is the only self-mirror (necessarily: the all-zero triple is its own mirror).
 - **The sign frame is an input, not a property of the trick.** A kickflip is +360 for a
   regular rider and -360 for a goofy one; the stance normalisation above is what makes one
   stored value serve both. The manifest keeps `stance_published` (riding direction:
@@ -503,9 +505,9 @@ nor `tricks.json` was read by any code under `skateid/` — both were opened onl
 |---|---|
 | root cause | labels are the *unstable* key. SkateAI publishes both a jargon name and the decomposed rotations, and its 31 names sit in exact 1:1 correspondence with its 31 triples — so the triple is the stable key. Normalising by name alone would need a hand-written alias per spelling *and* still could not detect a clip whose name and components disagree |
 | fix | `skateid/taxonomy.py`: `data/tricks.json` is the **rotation dictionary** and `data/flatground_allowlist.csv` the **name registry**. A row's `label` is now *derived* from its triple (`label_from_rotation`); the raw spelling is kept in a new `label_source` column for provenance, and the guardrail cross-checks the two paths against each other |
-| dictionary size | 15 → **39** canonical names, 35 rotation-expressible. The 16 added are exactly the SkateAI tricks that had no canonical (bigflip, bigheel, biggerflip, all four bs/fs-180-flip variants, 360 shuvit, …). 4 names stay allowlisted but are documented as **not** rotation-expressible: `half_cab`, `full_cab`, `impossible`, `none` |
+| dictionary size | 15 → **45** canonical names, 41 rotation-expressible. 16 were added for the SkateAI tricks that had no canonical (bigflip, bigheel, biggerflip, all four bs/fs-180-flip variants, 360 shuvit, …), and 6 more to close the stance mirror (§12.4). 4 names stay allowlisted but are documented as **not** rotation-expressible: `half_cab`, `full_cab`, `impossible`, `none` |
 | verification | all 31 upstream spellings resolve, and the rotation-derived and alias-derived canonicals agree on **all 31** (0 mismatches) — two independent paths cross-validate the dictionary against the data |
-| manifest | 671 rows × **31** columns (added `label_source`, `license`). `skateboardml`'s components are back-filled from the dictionary so the union is uniform: **0** null rotation values. `skateai` labels are now canonical (`treflip`→`tre_flip`, `bigflip`→`bs_bigspin_kickflip`, `shovit`→`pop_shuvit`) |
+| manifest | 671 rows (added `label_source`, `license`, and `stance_published`/`stance_input`). `skateboardml`'s components are back-filled from the dictionary so the union is uniform: **0** null rotation values. `skateai` labels are now canonical (`treflip`→`tre_flip`, `bigflip`→`bs_bigspin_kickflip`, `shovit`→`pop_shuvit`) |
 | licence column | new `license` column. **Neither** upstream repo ships a licence file (GitHub's licence API 404s for both), so it records the terms each project *states*: SkateboardML "academic-use-only, provided you cite" (Zenodo `10.5281/zenodo.3986905`); SkateAI has no licence statement and derives from copyrighted BATB footage, so its clips stay local and are never redistributed |
 | guardrail | §5 is now real: `build_manifest()` calls `validate_or_raise()`; `skateid validate` re-runs it on demand; `tests/test_scope.py` holds the positive assertion **and five negative ones**. `skateid validate` on the shipped manifest: **PASSED**, 671 rows |
 | **B1** | `skateid/baselines.py` — frozen feature extractor + linear probe, over a registry of backends: `videomae` (768-d, needs `deeplearning` + `transformers<5`), `resnet18`/`resnet50`/`mvit_v2_s`/`swin_t`, and `motion_stats` (18-d, numpy-only, runs anywhere). Features cache per clip under `cache/features/<backend>_<count>f_<w>x<h>/<clip_id>.npy`, so a re-score never re-decodes video. **Why beat it:** (a) it bounds what generality buys — if the pose/board pipeline cannot beat it, that representation is not earning its complexity, and we learn that in ~30 min rather than days; (b) it is the number a reviewer asks for, being the standard cheap protocol in video action recognition; (c) **it tests the dataset, not just the model** — a frozen embedder keys on appearance, so scoring well above the floor would mean the labels are separable by venue/camera/clothing rather than by rotation, which is a leakage alarm; (d) it is the ceiling for "no motion model", since mean-pooling frames ignores rotation order by construction |
@@ -513,8 +515,55 @@ nor `tricks.json` was read by any code under `skateid/` — both were opened onl
 | **B1 correctness** | two bugs found and fixed, both producing a plausible *wrong* score rather than a crash. (1) `transformers>=5` **silently** drops VideoMAE's legacy `{0...11}` state-dict keys (torch 2.x no longer expands them), leaving the attention biases randomly initialised — a "frozen pretrained" encoder that is partly noise. Fixed by pinning `transformers<5` **and** by `VideoMAEEmbedder` loading with `output_loading_info=True` and raising on any missing key; the 66 tolerated unexpected keys are VideoMAE's pretraining decoder, correct to discard for an encoder-only probe. (2) the feature cache was keyed on `clip_id` alone, so a re-run at a new resolution would silently reuse old features; the cache key now carries the sampling grid (`<backend>_<count>f_<w>x<h>/`). Backends also declare `input_size`/`input_frames`, because VideoMAE's temporal position embeddings are fixed at 16 frames and 8 frames dies with an opaque tensor-size error |
 | **B2** | zero-shot VLM via `skateid baselines --b2 --vlm {openai,anthropic,google,ollama}`. The prompt is built from the registry, never hard-coded, and the free-text answer is resolved with `Taxonomy.normalize_label` — the first real consumer of the alias table, with word-bounded longest match so "backside flip" cannot collapse onto the generic `flip` alias. Abstentions (`unknown`) score **wrong** and are reported separately. **Why bother:** it sets the *prior-knowledge* floor — near chance means a frozen generalist genuinely cannot do this and the task needs the rotation reasoning this project is built around; a high score would mean either the task is easier than assumed or the VLM is reading the venue, which B1's shortcut check can confirm. It is also a labelling aid for active learning and the M3 second opinion |
 | honesty | `motion_stats` and the `mock` VLM backend exist to exercise the pipeline; their numbers are plumbing checks and must never be published as results. Backends that cannot run **skip with an explicit reason** rather than returning a quiet number |
-| tests | **36 passed** (was 8): taxonomy round-trips, alias↔rotation cross-checks, the four rotation-free names, the guardrail's five negative cases, licence recording, sampling-grid cache keys, declared backend geometry, and hermetic B1/B2 tests that synthesise their own clips with OpenCV |
-| still open | B2 against a real model needs an API key or a local Ollama. The installed torch is the **CPU** build (`2.14.0+cpu`), so these are CPU numbers; the machine has an RTX 3060 that M1's YOLO pose/board work should use, so torch should be reinstalled from the CUDA index before M1. Still no skater-disjoint split (§12.1), so nothing here is a generalisation claim |
+| tests | **40 passed** (was 8): taxonomy round-trips, alias↔rotation cross-checks, the four rotation-free names, the guardrail's five negative cases, licence recording, the stance split, the stance mirror as a bijection, sampling-grid cache keys, declared backend geometry, and hermetic B1/B2 tests that synthesise their own clips with OpenCV |
+| still open | B2 against a real model needs an API key or a local Ollama, which was declined, so B2 is **code-complete but unmeasured**. The installed torch is the **CPU** build (`2.14.0+cpu`), so these are CPU numbers; the machine has an RTX 3060 that M1's YOLO pose/board work should use, so torch should be reinstalled from the CUDA index before M1. Still no skater-disjoint split (§12.1), so nothing here is a generalisation claim |
+
+### 12.4 M0 closeout (2026-09-27)
+
+M0's stated scope and exit gate: *"uv env + skeleton + 222 clips + manifest + both
+splits + B0/B1/B2"* → *"`skateid train && skateid eval` prints a confusion matrix +
+a floor"*. Verdict: **met, with one documented substitution.**
+
+| M0 deliverable | State |
+|---|---|
+| environment | done, on a project `.venv` at Python 3.14.7 (not `uv`: not installed on this machine, so plain `venv` + `pip`; `pyproject.toml` stays compatible with both) |
+| skeleton + manifest | done. 671 rows, `split_published` and `split_holdout` both populated for every clip and verified disjoint |
+| clips | done, and then some: the planned 222 SkateboardML **plus all 449 SkateAI** clips, cut from 12 BATB sources |
+| B0 floor | done. 6 dataset×split combinations, all reproducing |
+| B1 frozen-embedder probe | done and **measured** (0.0401 macro-F1 with VideoMAE vs a 0.0101 floor) |
+| B2 zero-shot VLM | **code complete, not measured** — needs an API key or a local Ollama, which was declined. The interfaces, prompt builder, answer resolver, abstention accounting and skip-with-reason path are all built and tested; only a key is missing |
+| scope guardrail (§5) | done, and the milestone's main defect fix. It was previously *promised and not implemented* |
+| flatground-only scope | done, enforced at ingestion rather than in prose |
+
+**What changed about the problem while doing M0.** The label-space defect was worse
+than "spelling inconsistency": `label` was never normalised at all, and neither
+vocabulary file was read by any code. The fix reordered the system's centre of
+gravity — the rotation triple became the source of truth and the name a
+derivation, which is what the plan specified in §3/§4 from the start but nothing
+implemented.
+
+**Three defects were found by refusing to accept a number**, and all three produced
+a plausible wrong answer rather than a crash:
+1. `transformers>=5` silently drops VideoMAE's legacy `{0...11}` state-dict keys, so
+   the "frozen pretrained" encoder had randomly initialised attention biases.
+2. The feature cache was keyed on `clip_id` alone, so a re-run at a new resolution
+   would reuse old features.
+3. The manifest's `stance` column held *riding directions* (`fakie`, `nollie`), not
+   the goofy/regular stance the sign convention depends on — a name that invited
+   exactly the silent kick↔heel / fs↔bs swap the project exists to avoid.
+
+**Also closed:** the stance mirror was not total (6 of 35 names had no mirrored
+partner); the 6 partners were added, making the mirror a **bijection** over all 41
+rotation-expressible names, so §7's mirror-with-label-swap is safe everywhere.
+
+**What M0 deliberately does not claim.** No trained model, no pose/board
+extraction, no generalisation claim: neither dataset yields a skater-disjoint
+split, and `all` mixes two different domains. B1's 0.0401 is 4× a floor, which is a
+correctness signal, not a capability.
+
+**Carried into M1:** resolve the goofy/regular toggle per clip into `stance_input`
+(§3's `auto` stays suggest-only); pose + board extraction; and reinstall torch
+from the CUDA index to use the RTX 3060 rather than the CPU build.
 
 
 

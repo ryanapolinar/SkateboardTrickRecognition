@@ -212,6 +212,48 @@
     "board_spin": -1,
     "body_spin": 0
   },
+  "fs_bigspin_kickflip": {
+    "display": "Frontside Bigspin Kickflip",
+    "flip": 1,
+    "board_spin": -2,
+    "body_spin": -1,
+    "note": "The stance mirror of bs_bigspin_kickflip (bigflip). No ingested dataset publishes this trick; it exists so mirror augmentation has a label to land on, making the mirror map a bijection."
+  },
+  "fs_biggerspin_heelflip": {
+    "display": "Frontside Biggerspin Heelflip",
+    "flip": -1,
+    "board_spin": -3,
+    "body_spin": -1,
+    "note": "The stance mirror of bs_biggerspin_kickflip (biggerflip). Present so the mirror map is total; no ingested dataset publishes it."
+  },
+  "bs_180_double_heelflip": {
+    "display": "Backside 180 Double Heelflip",
+    "flip": -2,
+    "board_spin": 1,
+    "body_spin": 1,
+    "note": "The stance mirror of fs_180_double_kickflip. Present so the mirror map is total; no ingested dataset publishes it."
+  },
+  "fs_180_double_heelflip": {
+    "display": "Frontside 180 Double Heelflip",
+    "flip": -2,
+    "board_spin": -1,
+    "body_spin": -1,
+    "note": "The stance mirror of bs_180_double_kickflip. Present so the mirror map is total; no ingested dataset publishes it."
+  },
+  "fs_360_double_flip": {
+    "display": "Frontside 360 Double Flip",
+    "flip": -2,
+    "board_spin": -2,
+    "body_spin": 0,
+    "note": "The stance mirror of tre_double_flip. Present so the mirror map is total; no ingested dataset publishes it."
+  },
+  "varial_double_heelflip": {
+    "display": "Varial Double Heelflip",
+    "flip": -2,
+    "board_spin": 1,
+    "body_spin": 0,
+    "note": "The stance mirror of hard_double_flip: a double heelflip with a backside 180 shuvit, named by analogy with varial_kickflip. Present so the mirror map is total; no ingested dataset publishes it."
+  },
   "half_cab": {
     "display": "Half Cab",
     "rotation_expressible": false,

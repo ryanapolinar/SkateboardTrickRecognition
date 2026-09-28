@@ -29,8 +29,9 @@ def test_allowlist_exists_and_valid():
     assert "category" in df.columns
     assert "aliases" in df.columns
     # The v1 vocabulary: every flatground trick the model can name, plus the
-    # documented rotation-free entries (half_cab, full_cab, impossible, none).
-    assert len(df) == 39, f"expected 39 canonical names, found {len(df)}"
+    # documented rotation-free entries (half_cab, full_cab, impossible, none) and
+    # the six added only to close the stance mirror.
+    assert len(df) == 45, f"expected 45 canonical names, found {len(df)}"
     assert df["canonical_name"].is_unique, "canonical names must be unique"
     assert set(df["category"]) == {"flatground"}, "v1 is flatground-only by definition"
     for name in ("ollie", "kickflip", "tre_flip", "bs_bigspin_kickflip"):
@@ -43,7 +44,7 @@ def test_tricks_json_is_the_rotation_dictionary():
         tricks = json.load(handle)
 
     entries = {name: props for name, props in tricks.items() if not name.startswith("_")}
-    assert len(entries) == 39, f"expected 39 dictionary entries, found {len(entries)}"
+    assert len(entries) == 45, f"expected 45 dictionary entries, found {len(entries)}"
 
     for name, props in entries.items():
         assert "display" in props, f"{name} has no display name"
@@ -261,27 +262,51 @@ def test_mirroring_a_rotation_is_the_geometric_mirror():
         assert rotation.mirrored().mirrored() == rotation
 
 
-def test_mirror_does_not_close_and_says_so():
-    """Documented limitation: 6 of 35 names have no mirrored partner.
+def test_stance_mirror_is_a_bijection_over_the_whole_vocabulary():
+    """Every name mirrors to exactly one name, and every name is mirrored once.
 
-    Their mirror is a real trick (a frontside biggerspin heelflip) that no
-    dataset publishes, so the dictionary cannot name it. This is the caveat on
-    the plan's mirror-with-label-swap augmentation.
+    This is what makes plan section 7's mirror-with-label-swap augmentation
+    total: there is no clip whose mirrored label has nowhere to land, and no two
+    tricks that collide on the same partner. Six names were added purely to
+    close the map (the frontside/backside partners of bigflip, biggerflip, the
+    180 double flips, tre double flip and hard double flip); none is published by
+    an ingested dataset, and each carries a `note` saying so.
     """
     taxonomy = Taxonomy.load()
     closure = taxonomy.mirror_closure()
+    assert closure["unmirrored"] == [], closure["unmirrored"]
 
-    assert set(closure) == {"named", "unmirrored"}
-    assert len(closure["named"]) + len(closure["unmirrored"]) == len(
-        taxonomy.dictionary.expressible_names()
-    )
-    assert len(closure["unmirrored"]) == 6, closure["unmirrored"]
-    assert "bs_biggerspin_kickflip" in closure["unmirrored"]
-    # Named partners are the expected skate-vocabulary pairs.
+    names = taxonomy.dictionary.expressible_names()
+    partners = {}
+    for name in names:
+        rotation = taxonomy.dictionary.rotation_for_label(name)
+        partner = taxonomy.name_for_mirrored(rotation)
+        assert partner is not None, f"{name} has no mirrored partner"
+        partners.setdefault(partner, []).append(name)
+
+    # Surjective (every name is hit) and injective (no name is hit twice).
+    assert set(partners) == set(names)
+    collisions = {key: value for key, value in partners.items() if len(value) > 1}
+    assert collisions == {}, collisions
+
+    # Spot-check the skate vocabulary, including the two self-mirrors.
     assert taxonomy.name_for_mirrored(Rotation(flip=1)) == "heelflip"
     assert taxonomy.name_for_mirrored(Rotation(flip=1, board_spin=2)) == "laser_flip"
-    # ollie is the one self-mirror, which is correct: mirroring an ollie is an ollie.
-    assert taxonomy.name_for_mirrored(Rotation()) == "ollie"
+    # bigflip (flip +1, bs 360, body 180) pairs with the pre-existing bigheel.
+    assert taxonomy.name_for_mirrored(Rotation(flip=1, board_spin=2, body_spin=1)) == (
+        "fs_bigspin_heelflip"
+    )
+    # ...while the newly added fs_bigspin_kickflip is the partner of the inward
+    # heelflip bigspin, which is a different trick with the opposite flip axis.
+    assert taxonomy.name_for_mirrored(Rotation(flip=-1, board_spin=2, body_spin=1)) == (
+        "fs_bigspin_kickflip"
+    )
+    # ollie is the only self-mirror, and necessarily so: the all-zero triple is
+    # its own mirror. Every other trick pairs with a different name -- a double
+    # kickflip mirrors to a double heelflip, not to itself.
+    self_mirrors = sorted(name for name, hits in partners.items() if name in hits)
+    assert self_mirrors == ["ollie"]
+    assert taxonomy.name_for_mirrored(Rotation(flip=2)) == "double_heelflip"
 
 
 def test_guardrail_rejects_a_riding_direction_used_as_a_stance():

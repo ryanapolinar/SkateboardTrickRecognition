@@ -140,7 +140,7 @@ binds them.
 | File | Role |
 |---|---|
 | `data/tricks.json` | **rotation dictionary** — canonical name ↔ the three rotations the model predicts |
-| `data/flatground_allowlist.csv` | **name registry** — 39 canonical names + 121 aliases (every upstream spelling) |
+| `data/flatground_allowlist.csv` | **name registry** — 45 canonical names + 135 aliases (every upstream spelling) |
 
 `skateid/taxonomy.py` loads both and refuses to start if they disagree, so a
 trick can never be half-added. Rotations live only in the dictionary and aliases
@@ -337,20 +337,28 @@ mistake is not a schema error, it is a silent sign flip on the data.
 geometric mirror), and `Taxonomy.name_for_mirrored()` names the result or returns
 `None` rather than inventing a name.
 
-### Mirroring does not close — 6 of 35 names
+### Mirroring is a bijection — closed
 
-Worth knowing before relying on mirror augmentation: the mirror of a trick need
-not be a *named* trick.
+The stance mirror was **not** total when first checked: 6 of the 35 names mirrored
+to a real trick that no dataset publishes (a frontside biggerspin heelflip, a
+frontside tre double flip, ...), so those clips had no label to swap to.
 
-| | |
-|---|---|
-| Named (29) | kickflip↔heelflip, pop_shuvit↔fs_shuvit, tre_flip↔laser_flip, bs_180↔fs_180, bigflip↔bigheel, … |
-| Unnamed (6) | `bs_biggerspin_kickflip`, `bs_bigspin_inward_heelflip`, `tre_double_flip`, `hard_double_flip`, `bs_180_double_kickflip`, `fs_180_double_kickflip` |
+**Closed by adding the 6 missing partners** — `fs_bigspin_kickflip`,
+`fs_biggerspin_heelflip`, `bs_180_double_heelflip`, `fs_180_double_heelflip`,
+`fs_360_double_flip`, `varial_double_heelflip`. Each is a genuine flatground
+rotation combo (so in scope per plan §5) and each carries a `note` saying no
+ingested dataset publishes it. They exist so the augmentation is total, not
+because anyone has filmed them.
 
-Their mirrors are real tricks — a frontside biggerspin heelflip, a frontside tre
-double flip — that **no dataset publishes**, so the dictionary cannot name them.
-Mirroring such a clip is still valid *input* augmentation; there is just no label
-to swap to. `ollie` is the one self-mirror, which is correct.
+The map is now a **bijection** over all 41 rotation-expressible names: every name
+mirrors to exactly one name, and no two names collide on the same partner. That
+is stronger than "total" and is what makes §7's mirror-with-label-swap safe
+everywhere. `ollie` is the only self-mirror, necessarily: the all-zero triple is
+its own mirror. A double kickflip is *not* self-mirrored — it becomes a double
+heelflip.
+
+Vocabulary: **45 canonical names**, 41 rotation-expressible, 4 documented
+rotation-free, 135 aliases.
 
 ## Baseline floor (B0)
 
