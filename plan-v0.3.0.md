@@ -124,8 +124,16 @@ the confidence/"not sure" signal - never clamped away.
 | Axis | Base per "one" | Sign convention (regular stance shown) |
 |---|---|---|
 | flip | **360 deg** per flip | `+` kickflip, `-` heelflip |
-| board_spin | **180 deg** per shuv | `+`/`-` = fs / bs |
-| body_spin | **180 deg** per turn | fs / bs |
+| board_spin | **180 deg** per shuv | `+`/`-` = bs / fs |
+| body_spin | **180 deg** per turn | bs / fs |
+
+> **Corrected in v0.3.1.** This row previously read `+`/`-` = fs / bs, which
+> contradicted every worked example below (`shuvit` `board +180`, `180` `board +180`,
+> `bigspin` `board +360`, `treflip` `board +360` are all *backside*) and contradicted
+> the ingested data: SkateAI's `treflip` clips carry `board_rotation_type='backside'`
+> with `board_rotation_number=2`. Backside-positive is now the single convention,
+> documented in `data/tricks.json` under `_sign_convention` and enforced by
+> `test_documented_sign_convention_matches_the_data`.
 
 ### Worked examples (label = quantize(predicted deg))
 ```
@@ -181,13 +189,33 @@ produced by the rotation outputs. Every rotation (flip/board/spin) can happen on
 - Casper / anti-casper and other balance tricks — deferred.
 - Any trick whose name or component combo needs an obstacle.
 
-**Guardrail (so it stays true, not just a promise):**
-- `data/flatground_allowlist.csv` — approved labels + allowed component combos.
-- `tests/test_scope.py` — fails CI if any `manifest.csv` row's label or combo is off-allowlist.
-- Manifest build rejects non-flatground rows at ingestion.
-- `tricks.json` is restricted to flatground names (SkateAI's 58 are all flatground; drop any
-  that need an obstacle).
+**Guardrail (so it stays true, not just a promise) — implemented in v0.3.1:**
+- `data/tricks.json` — the **rotation dictionary**: canonical name ↔ the three rotations
+  (§4). 39 entries, 35 of which have a triple. This is the authority: a row's `label` is
+  *derived* from its triple, not read from a name.
+- `data/flatground_allowlist.csv` — the **name registry**: 39 canonical names + 121
+  aliases (every upstream SkateAI spelling included). Aliases are not allowed to collide.
+- `skateid/taxonomy.py` — loads both, and refuses to construct a `Taxonomy` if they
+  disagree, so a trick can never be half-added.
+- `build_manifest()` calls `validate_or_raise()`, so **manifest build rejects
+  non-flatground rows at ingestion** (this also back-fills SkateboardML's components).
+- `tests/test_scope.py` — fails CI if any `manifest.csv` row's label or combo is
+  off-allowlist, and includes the negative cases (off-list label, label contradicting
+  its own triple, empty/over-range/inconsistent components, name-component mismatch).
+- `skateid validate` — the same check on demand, e.g. in a pre-commit or CI step.
 - README capture guide: film only flatground attempts; no obstacle in frame.
+
+> **Corrected in v0.3.1.** This section previously cited "SkateAI's 58" names. The
+> ingested metadata has **31 distinct trick names** and **73 distinct
+> (stance, trick) pairs**; 58 is neither, and the number has been removed. The v1
+> vocabulary is 39 canonical names, not 58.
+>
+> The 4 allowlisted-but-**not rotation-expressible** names are recorded in
+> `tricks.json` with a `note` explaining how they are represented instead:
+> `half_cab`/`full_cab` share their triple with `bs_180`/`bs_360` and are recovered
+> from `(stance, label)` (§3); `impossible` rotates about an axis the 3-axis model
+> lacks; `none` collides with `ollie` at `(0,0,0)` and needs a separate no-trick gate.
+> Ingesting any of them fails loudly rather than being silently mislabelled.
 
 **Alignment check — all three sources are already flatground, so no new data is needed:**
 SkateboardML = ollie/kickflip ✓ · SkateAI = BATB flatground battles ✓ · Swinburne = BATB ✓
@@ -385,35 +413,96 @@ eval baseline), `fastapi`, `uvicorn`, `python-multipart`, `opencv-python`, `nump
 | | Work | Exit gate |
 |---|---|---|
 | **M0** half day | uv env + skeleton + download 222 clips + manifest + both splits + B0/B1/B2 | `skateid train && skateid eval` prints a confusion matrix + a floor |
-| **M1** 1 day | pose features + LR -> tiny transformer, flip head (regression + quantization) | >= 95 % macro-F1 vs. `split_holdout` sanity floor (not a generalisation claim until M3); **else stop and fix features before scaling** |
+| **M1** 1-2 days | pull SkateAI's 449 BATB clips in (12 source videos -> 449 cuts); pose features + LR -> tiny transformer, flip head (regression + quantization) | 449 `skateai` clips in the manifest with a **video-disjoint** `split_holdout`; then >= 95 % macro-F1 vs. the `skateai` holdout floor (still not a skater-disjoint claim); **else stop and fix features before scaling** |
 | **M2** 1-2 days | board corners merged (still zero labels); oracle plots for board features | board stream adds >= 3 macro-F1 over pose-only; flip visible in `--debug` |
-| **M3** 2-4 days | `skateid serve` end-to-end on 2 classes; then the BATB cutter + SkateAI's 449 clips; more heads; abstain calibration | all three rotation heads live; >= 90 % correct-or-abstained; web page shows trick or "not sure" in <2 s |
+| **M3** 2-4 days | `skateid serve` end-to-end; more heads (flip / board / body); abstain calibration; exploit SkateAI's 31-class compositional labels | all three rotation heads live; >= 90 % correct-or-abstained; web page shows trick or "not sure" in <2 s |
 | **M4** optional | web polish (annotate toggle, top-3 list, batch in page); ONNX export; distill board -> YOLO26-OBB | < 0.5 s/clip |
 
-### 12.1 M0 status as built (2026-09-27)
+### 12.1 M0 status as built, plus the M1 SkateAI pull (2026-09-27)
 
 | Item | Status |
 |---|---|
-| env | **system Python 3.10** — `uv` is not installed on this machine; `pyproject.toml` stays uv/pip-compatible for later |
-| data | 222 SkateboardML clips (Kickflip 114 / Ollie 108), 0 duplicate content hashes |
-| manifest | `data/manifest.csv`, 222 rows |
+| env | **project venv on Python 3.14.7** (`.venv`, `requires-python = ">=3.10"`); `uv` is not installed, so plain `venv` + `pip`, and `pyproject.toml` stays uv/pip-compatible for later |
+| data | 222 SkateboardML clips (Kickflip 114 / Ollie 108) + **449 SkateAI clips** cut from 12 BATB source videos; 0 duplicate content hashes |
+| manifest | `data/manifest.csv`, 671 rows, 29 columns (compositional labels + clip provenance) |
 
-**Honest limitation — there is no clean split yet.** SkateboardML publishes no skater or
-session identity, so `skater_id` in the manifest is a synthetic bucket over the clip number
-(`num % 8`, recorded in the `skater_id_source` column as `synthetic_clip_number`). The column
-is deliberately named `split_holdout`, **not** `split_clean`, because it is a placeholder that
-only proves the split plumbing works. It must never be reported as a leakage-free benchmark,
-and the dataset is drawn from such a small pool of people that a genuine person-disjoint split
-is not achievable from SkateboardML alone. A real clean split becomes possible at **M3**, once
-SkateAI's per-clip skater labels are in the manifest; until then the M1 exit gate below reads
-"macro-F1 on `split_holdout`" as a sanity floor, not as a generalisation claim.
+**Two honest limitations remain, but they shrank at M1.** SkateAI is now ingested:
+449 BATB clips carrying compositional labels (`stance`, `landed`, `flip_type`,
+`board_rotation_*`, `body_rotation_*`), cut from 12 source videos. Its `split_holdout` is
+**group-disjoint by source video** (`split_source = source_video_url`); no clip is scored
+while a near-duplicate cut of the same battle sits in training. Both datasets still lack a
+**skater-disjoint** split: SkateboardML publishes no skater identity at all (its `skater_id`
+is `num % 8`, a documented placeholder), and SkateAI never records which of the two BATB
+competitors performed a clip (`skater_id_source = not_published_per_clip`). So `split_holdout`
+is never reported as a leakage-free benchmark.
 
-M0 baseline floor (B0 majority class, no learning):
+B0 majority-class floor per dataset and split, refreshed after the SkateAI pull (`skateid train/eval --dataset <ds> --split <s>`):
 
-| Split | Test clips | Majority class | Accuracy | Macro F1 |
-|---|---|---|---|---|
-| `split_published` (author's own list) | 44 | ollie | 0.3409 | 0.2542 |
-| `split_holdout` (placeholder) | 58 | kickflip | 0.5172 | 0.3409 |
+| Dataset | Split | Train | Test | Classes in test | Majority class | Accuracy | Macro F1 |
+|---|---|---|---|---|---|---|---|
+| `all` (671) | `split_published` | 537 | 134 | 26 | kickflip | 0.2687 | 0.0163 |
+| `all` (671) | `split_holdout` | 501 | 170 | 23 | kickflip | 0.2235 | 0.0159 |
+| `skateboardml` (222) | `split_published` | 178 | 44 | 2 | ollie | 0.3409 | 0.2542 |
+| `skateboardml` (222) | `split_holdout` | 164 | 58 | 2 | kickflip | 0.5172 | 0.3409 |
+| `skateai` (449) | `split_published` | 359 | 90 | 25 | tre_flip | 0.1000 | 0.0073 |
+| `skateai` (449) | `split_holdout` | 337 | 112 | 22 | tre_flip | 0.1250 | 0.0101 |
+
+The two `skateboardml` rows are exactly the M0 numbers, which confirms the manifest schema
+change did not disturb the existing splits. All six rows **reproduce unchanged** after the
+v0.3.1 vocabulary work: only the spelling of the `skateai` majority class changed
+(`treflip` → `tre_flip`), and the class count per split is identical because the
+name → canonical mapping is a bijection. The `skateai` holdout is coarse by nature: 449
+clips come from only 12 source videos, so it puts 2 videos in test (112 clips, 22 classes)
+and 10 in train (337 clips). `source_group` (`BATB 1` / `BATB 11`) is **not** a usable
+grouping key -- `BATB 1` alone spans 11 of the 12 videos -- so the split keys on
+`source_video_url`.
+
+### 12.2 M1 status: environment + dataset pull (2026-09-27)
+
+| Item | Status |
+|---|---|
+| env | rebuilt as a project **`.venv` on Python 3.14.7**. Everything verified there: numpy 2.5.3, pandas 3.0.6, opencv-python-headless 5.0.0.93, scikit-learn 1.9.1, fastapi 0.141.1, uvicorn 0.54.0, pytest 9.1.1, yt-dlp 2026.8.19. The `deeplearning` extra resolves to torch 2.14.0 / torchvision 0.29.0 / ultralytics 8.4.164 (cp314 wheels exist) |
+| interpreter trap | a bare `python` now resolves to a `pythoncore-3.14` runtime that has no project packages, and a long-lived shell can carry stale `...Programs\\Python\\Python310\\Scripts` PATH entries whose launchers point at a deleted interpreter -- so bare `pytest` / `yt-dlp` / `skateid` can be broken wrappers. Hence: always use `.venv`. `requires-python` stays `>=3.10`; 3.13 is supported but is not installed here |
+| skateai labels | 5 upstream files (metadata, author split, trick names) fetched; 449 rows, 31 trick classes, 4 stances, `landed` true/false |
+| skateai clips | **449/449** cut from 12 BATB source videos with yt-dlp + ffmpeg; 0 leftover source files; resumable |
+| downloader | the upstream `labeling_tool/generate_data.py` (the README's `labelling_tool` path is wrong) cannot run on a 2026 stack -- it imports `pytube` (broken against current YouTube), `moviepy.editor` (removed in moviepy 2) and `wandb`. Re-implemented as `download_skateai_clips()`: one source download per battle, amortised over all of its cuts |
+| upstream bug | SkateAI's split CSVs must be joined on `(video_title, video_file)`; `video_file` alone repeats across battles (70 unique values for 449 clips), so joining on it mixes clips between battles |
+| tests | **8 passed** (was 4): added group-disjoint-split, SkateAI label consistency, video-disjoint holdout, and interpreter-range guards |
+
+Two caveats carried forward. First, `all`-dataset numbers are a **union benchmark**:
+222 SkateboardML clips and 449 BATB clips differ in footage, resolution and framing,
+so they are not one domain. Second, neither dataset yields a skater-disjoint split
+(§12.1), so no number from either `split_holdout` is a generalisation claim yet.
+
+**Open defect found while re-reading those numbers: `label` is never normalised to the
+allowlist.** *(Recorded at the time; now RESOLVED — see §12.3.)* SkateAI rows kept their
+upstream spellings (`treflip`, `shovit`, `varial flip`, `laserflip`, `inward heel`,
+`bs 360`, ...) while SkateboardML rows used allowlist canonicals (`kickflip`, `ollie`).
+Only **3** of SkateAI's 31 names coincided with a canonical name, and `treflip` was not
+even an alias of `tre_flip`, so `all` carried **32** distinct labels of which exactly
+**one** (`kickflip`) was shared by both datasets. Worse, neither `flatground_allowlist.csv`
+nor `tricks.json` was read by any code under `skateid/` — both were opened only by
+`tests/test_scope.py` — so the guardrail promised in §5 was not implemented.
+
+### 12.3 v0.3.1 status: vocabulary, guardrail, and B1/B2 (2026-09-27)
+
+| Item | Status |
+|---|---|
+| root cause | labels are the *unstable* key. SkateAI publishes both a jargon name and the decomposed rotations, and its 31 names sit in exact 1:1 correspondence with its 31 triples — so the triple is the stable key. Normalising by name alone would need a hand-written alias per spelling *and* still could not detect a clip whose name and components disagree |
+| fix | `skateid/taxonomy.py`: `data/tricks.json` is the **rotation dictionary** and `data/flatground_allowlist.csv` the **name registry**. A row's `label` is now *derived* from its triple (`label_from_rotation`); the raw spelling is kept in a new `label_source` column for provenance, and the guardrail cross-checks the two paths against each other |
+| dictionary size | 15 → **39** canonical names, 35 rotation-expressible. The 16 added are exactly the SkateAI tricks that had no canonical (bigflip, bigheel, biggerflip, all four bs/fs-180-flip variants, 360 shuvit, …). 4 names stay allowlisted but are documented as **not** rotation-expressible: `half_cab`, `full_cab`, `impossible`, `none` |
+| verification | all 31 upstream spellings resolve, and the rotation-derived and alias-derived canonicals agree on **all 31** (0 mismatches) — two independent paths cross-validate the dictionary against the data |
+| manifest | 671 rows × **31** columns (added `label_source`, `license`). `skateboardml`'s components are back-filled from the dictionary so the union is uniform: **0** null rotation values. `skateai` labels are now canonical (`treflip`→`tre_flip`, `bigflip`→`bs_bigspin_kickflip`, `shovit`→`pop_shuvit`) |
+| licence column | new `license` column. **Neither** upstream repo ships a licence file (GitHub's licence API 404s for both), so it records the terms each project *states*: SkateboardML "academic-use-only, provided you cite" (Zenodo `10.5281/zenodo.3986905`); SkateAI has no licence statement and derives from copyrighted BATB footage, so its clips stay local and are never redistributed |
+| guardrail | §5 is now real: `build_manifest()` calls `validate_or_raise()`; `skateid validate` re-runs it on demand; `tests/test_scope.py` holds the positive assertion **and five negative ones**. `skateid validate` on the shipped manifest: **PASSED**, 671 rows |
+| **B1** | `skateid/baselines.py` — frozen feature extractor + linear probe, over a registry of backends: `videomae` (768-d, needs `deeplearning` + `transformers<5`), `resnet18`/`resnet50`/`mvit_v2_s`/`swin_t`, and `motion_stats` (18-d, numpy-only, runs anywhere). Features cache per clip under `cache/features/<backend>_<count>f_<w>x<h>/<clip_id>.npy`, so a re-score never re-decodes video. **Why beat it:** (a) it bounds what generality buys — if the pose/board pipeline cannot beat it, that representation is not earning its complexity, and we learn that in ~30 min rather than days; (b) it is the number a reviewer asks for, being the standard cheap protocol in video action recognition; (c) **it tests the dataset, not just the model** — a frozen embedder keys on appearance, so scoring well above the floor would mean the labels are separable by venue/camera/clothing rather than by rotation, which is a leakage alarm; (d) it is the ceiling for "no motion model", since mean-pooling frames ignores rotation order by construction |
+| **B1 first results** | measured, all on `skateai`/`split_holdout` (337/112, 22 classes), CPU: B0 floor **0.0101** · `resnet18` (512-d, ImageNet) **0.0208** · `motion_stats` (18-d, hand-crafted) **0.0285** · `videomae` (768-d, Kinetics-400) **0.0401**. Two readings: (a) **a strong generic image encoder is not enough** — 512-d frozen ResNet-18 scores *below* 18-d motion statistics, so the labels are not separable by venue/camera/clothing; the shortcut check is working. (b) **temporal modelling is what helps** — VideoMAE, the only time-aware backend, is best at ~2x the ImageNet probe, an early (not conclusive) signal that rotation *order* is the signal, i.e. the §4 hypothesis. All of it stays far below useful: 4x a 0.0101 floor on 22 classes is a correctness signal, not a capability |
+| **B1 correctness** | two bugs found and fixed, both producing a plausible *wrong* score rather than a crash. (1) `transformers>=5` **silently** drops VideoMAE's legacy `{0...11}` state-dict keys (torch 2.x no longer expands them), leaving the attention biases randomly initialised — a "frozen pretrained" encoder that is partly noise. Fixed by pinning `transformers<5` **and** by `VideoMAEEmbedder` loading with `output_loading_info=True` and raising on any missing key; the 66 tolerated unexpected keys are VideoMAE's pretraining decoder, correct to discard for an encoder-only probe. (2) the feature cache was keyed on `clip_id` alone, so a re-run at a new resolution would silently reuse old features; the cache key now carries the sampling grid (`<backend>_<count>f_<w>x<h>/`). Backends also declare `input_size`/`input_frames`, because VideoMAE's temporal position embeddings are fixed at 16 frames and 8 frames dies with an opaque tensor-size error |
+| **B2** | zero-shot VLM via `skateid baselines --b2 --vlm {openai,anthropic,google,ollama}`. The prompt is built from the registry, never hard-coded, and the free-text answer is resolved with `Taxonomy.normalize_label` — the first real consumer of the alias table, with word-bounded longest match so "backside flip" cannot collapse onto the generic `flip` alias. Abstentions (`unknown`) score **wrong** and are reported separately. **Why bother:** it sets the *prior-knowledge* floor — near chance means a frozen generalist genuinely cannot do this and the task needs the rotation reasoning this project is built around; a high score would mean either the task is easier than assumed or the VLM is reading the venue, which B1's shortcut check can confirm. It is also a labelling aid for active learning and the M3 second opinion |
+| honesty | `motion_stats` and the `mock` VLM backend exist to exercise the pipeline; their numbers are plumbing checks and must never be published as results. Backends that cannot run **skip with an explicit reason** rather than returning a quiet number |
+| tests | **36 passed** (was 8): taxonomy round-trips, alias↔rotation cross-checks, the four rotation-free names, the guardrail's five negative cases, licence recording, sampling-grid cache keys, declared backend geometry, and hermetic B1/B2 tests that synthesise their own clips with OpenCV |
+| still open | B2 against a real model needs an API key or a local Ollama. The installed torch is the **CPU** build (`2.14.0+cpu`), so these are CPU numbers; the machine has an RTX 3060 that M1's YOLO pose/board work should use, so torch should be reinstalled from the CUDA index before M1. Still no skater-disjoint split (§12.1), so nothing here is a generalisation claim |
+
 
 
 ---
@@ -422,7 +511,7 @@ M0 baseline floor (B0 majority class, no learning):
 
 | Risk | Mitigation |
 |---|---|
-| Public-clip near-duplicates inflate scores | hash + perceptual dedup; skater/source-disjoint split; report both splits. **SkateboardML cannot supply a real skater-disjoint split** (no skater labels, tiny pool of people), so its `split_holdout` is a placeholder and the first genuine clean split arrives with SkateAI at M3 |
+| Public-clip near-duplicates inflate scores | hash + perceptual dedup; skater/source-disjoint split; report both splits. **Neither dataset supplies a genuine skater-disjoint split**: SkateboardML has no skater labels (tiny pool of people), so its `split_holdout` is a placeholder; SkateAI's is source-video-disjoint but not skater-disjoint, because BATB is a 1v1 bracket that never records which of the two competitors performed a clip and competitors recur across battles |
 | Oblique/vertical camera makes board roll ambiguous | skater-relative features, stance normalisation, mirrored aug, capture guide in README; the sign convention is checked in `--debug` |
 | **Wrong/unknown stance -> kick<->heel, fs<->bs mirror** | default `auto` (suggest-only, never trusted); user overrides to goofy/regular; show the stance on the page + output; verify the sign in `--debug` |
 | Tiny data overfits | ~0.5 M-param model, LR floor, heavy aug, early-stop on clean val |
