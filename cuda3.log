@@ -1,0 +1,20 @@
+Looking in indexes: https://download.pytorch.org/whl/cu128
+Collecting torch==2.11.0+cu128
+  Downloading torch-2.11.0%2Bcu128-cp314-cp314-win_amd64.whl.metadata (29 kB)
+Collecting torchvision==0.26.0+cu128
+  Downloading torchvision-0.26.0%2Bcu128-cp314-cp314-win_amd64.whl.metadata (5.6 kB)
+Downloading torch-2.11.0%2Bcu128-cp314-cp314-win_amd64.whl (2771.0 MB)
+   ---------------------------------------- 2.8/2.8 GB 11.5 MB/s  0:00:56
+Downloading torchvision-0.26.0%2Bcu128-cp314-cp314-win_amd64.whl (9.7 MB)
+   ---------------------------------------- 9.7/9.7 MB 46.0 MB/s  0:00:00
+Installing collected packages: torchvision, torch
+  Attempting uninstall: torchvision
+    Found existing installation: torchvision 0.29.0
+    Uninstalling torchvision-0.29.0:
+      Successfully uninstalled torchvision-0.29.0
+  Attempting uninstall: torch
+    Found existing installation: torch 2.14.0
+    Uninstalling torch-2.14.0:
+      Successfully uninstalled torch-2.14.0
+
+Successfully installed torch-2.11.0+cu128 torchvision-0.26.0+cu128

@@ -35,8 +35,14 @@ dev = [
     "pytest>=8.0",
 ]
 deeplearning = [
-    # torch 2.6 is the first release with cp313 wheels; pip resolves to the
-    # newest compatible build (2.14.x on Python 3.14).
+    # M1 runs on the RTX 3060, so torch comes from the CUDA index, not PyPI:
+    #   pip install --index-url https://download.pytorch.org/whl/cu128 \
+    #       torch==2.11.0+cu128 torchvision==0.26.0+cu128
+    # 2.11 is the newest CUDA 12.8 build the index publishes; the PyPI CPU wheel
+    # is 2.14, so enabling CUDA is a *downgrade*. The >=2.6 floor below still
+    # holds, but `skateid doctor` should report which build is actually loaded,
+    # because a CPU wheel here is silent -- it just runs everything ~20x slower
+    # and the scores still come out, looking like a modelling result.
     "torch>=2.6",
     "torchvision>=0.21",
     "ultralytics>=8.3",
