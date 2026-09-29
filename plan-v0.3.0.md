@@ -428,7 +428,7 @@ eval baseline), `fastapi`, `uvicorn`, `python-multipart`, `opencv-python`, `nump
 | | Work | Exit gate |
 |---|---|---|
 | **M0** half day | uv env + skeleton + download 222 clips + manifest + both splits + B0/B1/B2 | `skateid train && skateid eval` prints a confusion matrix + a floor |
-| **M1** 1-2 days | pull SkateAI's 449 BATB clips in (12 source videos -> 449 cuts); pose features + LR -> tiny transformer, flip head (regression + quantization) | 449 `skateai` clips in the manifest with a **video-disjoint** `split_holdout`; then >= 95 % macro-F1 vs. the `skateai` holdout floor (still not a skater-disjoint claim); **else stop and fix features before scaling** |
+| **M1** 1-2 days | pull SkateAI's 449 BATB clips in (12 source videos -> 449 cuts); pose features + LR -> tiny transformer, flip head (regression + quantization) | 449 `skateai` clips in the manifest with a **video-disjoint** `split_holdout`; then **pose/board features beat the best measured holdout floor (0.0401, VideoMAE) by >= 5x macro-F1 (>= 0.20)**, with the confusion matrix published showing what is still hard; **else stop and fix features before scaling**. Still not a skater-disjoint claim. Gate revised 2026-09-28 — see §12.5 |
 | **M2** 1-2 days | board corners merged (still zero labels); oracle plots for board features | board stream adds >= 3 macro-F1 over pose-only; flip visible in `--debug` |
 | **M3** 2-4 days | `skateid serve` end-to-end; more heads (flip / board / body); abstain calibration; exploit SkateAI's 31-class compositional labels | all three rotation heads live; >= 90 % correct-or-abstained; web page shows trick or "not sure" in <2 s |
 | **M4** optional | web polish (annotate toggle, top-3 list, batch in page); ONNX export; distill board -> YOLO26-OBB | < 0.5 s/clip |
@@ -564,6 +564,45 @@ correctness signal, not a capability.
 **Carried into M1:** resolve the goofy/regular toggle per clip into `stance_input`
 (§3's `auto` stays suggest-only); pose + board extraction; and reinstall torch
 from the CUDA index to use the RTX 3060 rather than the CPU build.
+
+### 12.5 M1 gate revised: 95 % macro-F1 -> 5x the floor (2026-09-28)
+
+M1's exit gate previously read ">= 95 % macro-F1 vs. the `skateai` holdout
+floor". That number was written before any holdout macro-F1 had been measured,
+and it is not a defensible target for this problem:
+
+- the best measured holdout macro-F1 is **0.0401** (VideoMAE), so 95 % is a ~24x
+  jump, on a task where holdout support per class is as low as 4 clips;
+- macro-F1 over ~23 classes with 170 holdout clips is dominated by the
+  low-support tail, where a single clip moves a class's F1 by ~0.1. A gate set
+  that close to the ceiling is measuring noise as much as capability;
+- the split is **video-disjoint, not skater-disjoint** (§12.1), so even a 95 %
+  score would not be a generalisation claim. The number was doing no work that
+  its cost justified.
+
+**The gate is now: beat the best measured holdout floor by >= 5x macro-F1,
+i.e. >= 0.20, and publish the confusion matrix showing what is still hard.**
+
+This is a *relative* bar, which is the honest form for a gate: it asks whether
+structured pose/board features actually extract more signal than a frozen
+ImageNet/VideoMAE probe, which is the specific hypothesis M1 exists to test. The
+absolute figure that falls out (0.20) looks low next to 95 %, but it is the
+correct comparison — it is 5x the strongest thing that has ever been measured
+here, on a 23-class rotation task from 449 cuts of 12 competition videos.
+
+**What is deliberately still required:**
+
+| | |
+|---|---|
+| **the failure branch** | "< 5x the floor -> stop and fix features before scaling" is unchanged, and is the genuinely valuable outcome. Pose features failing to beat a frozen probe would be a real result about this representation, not a schedule problem |
+| **published evidence** | the confusion matrix ships with the number, so the score is auditable rather than a single summary statistic |
+| **the honesty label** | video-disjoint, not skater-disjoint, is restated in the gate itself |
+
+**Not changed:** M0's exit gate, M2's "+3 macro-F1 for the board stream", M3's
+">= 90 % correct-or-abstained", or M4's latency target. M3's gate has a separate
+weakness worth revisiting when M3 is actually in scope: "correct-or-abstained"
+is trivially satisfiable by abstaining on everything, and needs an abstention
+rate ceiling before it is used as a gate.
 
 
 
