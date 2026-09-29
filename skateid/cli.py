@@ -264,6 +264,53 @@ def baselines_cmd(args: argparse.Namespace) -> int:
         print(f"\nWrote {out_path}")
     return 0
 
+def stance_cmd(args) -> int:
+    """Set or report the goofy/regular toggle.
+
+    Reporting is the default: `stance_input` is empty on every row today, and
+    that is the honest state rather than a failure. Writing happens only through
+    an explicit `--set`, so this command can never fill the column by accident.
+    """
+    from . import stance as stance_module
+
+    frame = pd.read_csv(args.manifest, dtype={"clip_id": str})
+
+    overrides = {}
+    for item in args.set:
+        if "=" not in item:
+            print(f"error: --set expects CLIP_ID=STANCE, got {item!r}", file=sys.stderr)
+            return 2
+        clip_id, value = item.split("=", 1)
+        overrides[clip_id.strip()] = value.strip()
+
+    unknown = sorted(set(overrides) - set(frame["clip_id"].astype(str)))
+    if unknown:
+        print(f"error: no such clip_id in the manifest: {unknown}", file=sys.stderr)
+        return 2
+
+    try:
+        updated = stance_module.apply_to_manifest(frame, overrides=overrides) if overrides else frame
+    except ValueError as error:
+        # A riding direction in --set is the mistake this command most invites, so
+        # it gets the explanation rather than a traceback.
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    if overrides:
+        updated.to_csv(args.manifest, index=False)
+        print(f"wrote {len(overrides)} stance value(s) to {args.manifest}")
+
+    summary = stance_module.stance_summary(updated)
+    print(f"stance: {summary['confirmed']}/{summary['rows']} clips confirmed, "
+          f"{summary['empty']} empty ({summary['goofy']} goofy, {summary['regular']} regular)")
+    if summary["confirmed"] == 0:
+        print(
+            "stance_input is empty everywhere. That is expected: the goofy/regular toggle is an\n"
+            "input (plan section 3), not something the published riding direction can supply.\n"
+            "Confirm per clip with:  skateid stance --set <clip_id>=goofy"
+        )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="skateid", description="SkateID flatground skateboard trick recognition")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -359,6 +406,19 @@ def main() -> int:
     baselines_p.add_argument("--limit", type=int, default=None, help="Cap clips (smoke test)")
     baselines_p.add_argument("--out", default="", help="Optional path to write the metrics as JSON")
 
+    stance_p = subparsers.add_parser(
+        "stance", help="Resolve the goofy/regular toggle (suggest-only; overrides win)"
+    )
+    stance_p.add_argument("--manifest", default="data/manifest.csv", help="Path to manifest CSV")
+    stance_p.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="CLIP_ID=STANCE",
+        help="Confirm a stance for one clip, e.g. --set clip_0001=goofy. Repeatable. "
+        "This is the only path that writes a value.",
+    )
+
     args = parser.parse_args()
     if args.command == "fetch":
         return fetch_cmd(args)
@@ -370,6 +430,8 @@ def main() -> int:
         return validate_cmd(args)
     elif args.command == "baselines":
         return baselines_cmd(args)
+    elif args.command == "stance":
+        return stance_cmd(args)
     return 0
 
 if __name__ == "__main__":

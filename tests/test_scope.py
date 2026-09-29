@@ -13,6 +13,15 @@ from skateid.eval import (
     evaluate_predictions,
     format_confusion_matrix,
 )
+from skateid.stance import (
+    CONFIDENCE_FLOOR,
+    SUGGESTION_COLUMN,
+    STANCE_COLUMN,
+    StanceSuggestion,
+    apply_to_manifest,
+    suggest_from_land_foot,
+    suggest_from_sequence,
+)
 from skateid.taxonomy import ROTATION_COLUMNS, Rotation, ScopeError, Taxonomy
 
 
@@ -311,6 +320,126 @@ def test_stance_mirror_is_a_bijection_over_the_whole_vocabulary():
     self_mirrors = sorted(name for name, hits in partners.items() if name in hits)
     assert self_mirrors == ["ollie"]
     assert taxonomy.name_for_mirrored(Rotation(flip=2)) == "double_heelflip"
+
+
+def test_stance_suggestions_never_silently_fill_the_manifest():
+    """The single most dangerous quiet failure in this project, pinned down.
+
+    A wrong stance does not crash: it negates every sign, swapping kick<->heel
+    and fs<->bs on every clip. So the rules are that a suggestion is *recorded*
+    but never *promoted* unless it clears a bar, and that a user override always
+    wins. Both halves are asserted here.
+    """
+    frame = pd.DataFrame(
+        {
+            "clip_id": ["a", "b", "c"],
+            "label": ["kickflip", "heelflip", "ollie"],
+            "stance_input": ["", "", ""],
+        }
+    )
+
+    # No input at all: nothing is written. The empty state is the safe default.
+    assert apply_to_manifest(frame)[STANCE_COLUMN].isna().all()
+
+    # A single frame's evidence is 0.5, and even a unanimous multi-frame vote is
+    # capped at 0.75 -- both below CONFIDENCE_FLOOR, so neither is promoted.
+    weak = suggest_from_land_foot(True)
+    assert weak.stance == "regular" and not weak.confident
+    unanimous = suggest_from_sequence([True] * 16)
+    assert unanimous.stance == "regular"
+    assert unanimous.confidence <= CONFIDENCE_FLOOR, "a unanimous vote still gets reviewed"
+    assert apply_to_manifest(frame, suggestions={"a": unanimous})[STANCE_COLUMN].isna().all()
+
+    # ...but the suggestion is still visible, which is the point of recording it.
+    out = apply_to_manifest(frame, suggestions={"a": unanimous})
+    assert out[SUGGESTION_COLUMN].iloc[0] == unanimous.confidence
+    assert out[SUGGESTION_COLUMN].iloc[1] == "", "no suggestion for a clip that got none"
+
+    # An override is the only path that writes, and it wins over a suggestion
+    # that says the opposite.
+    out = apply_to_manifest(
+        frame, overrides={"a": "goofy"}, suggestions={"a": unanimous, "b": weak}
+    )
+    assert out[STANCE_COLUMN].iloc[0] == "goofy"
+
+    # A riding direction cannot masquerade as a stance, here or via override.
+    for bad in ("fakie", "switch", "nollie"):
+        with pytest.raises(ValueError, match="toggle"):
+            apply_to_manifest(frame, overrides={"a": bad})
+
+    # A confident suggestion is promoted, so the mechanism is not dead code.
+    strong = StanceSuggestion("regular", CONFIDENCE_FLOOR, "hand-checked")
+    assert apply_to_manifest(frame, suggestions={"a": strong})[STANCE_COLUMN].iloc[0] == "regular"
+
+    # And the result still passes the scope guardrail. Checked against the real
+    # manifest rather than the toy frame above, since the guardrail also checks
+    # the rotation columns the toy frame has no business having.
+    taxonomy = Taxonomy.load("data/tricks.json", "data/flatground_allowlist.csv")
+    manifest = pd.read_csv("data/manifest.csv", dtype={"clip_id": str})
+    clip = manifest["clip_id"].iloc[0]
+    updated = apply_to_manifest(manifest, overrides={clip: "goofy"})
+    assert updated[STANCE_COLUMN].iloc[0] == "goofy"
+    assert taxonomy.validate_frame(updated) == []
+    # Every other row is still empty, so the guardrail sees no new violation and
+    # the rest of the dataset is untouched.
+    assert updated[STANCE_COLUMN].iloc[1:].isna().all()
+
+
+def test_stance_vote_does_not_act_on_a_tie():
+    """A tied vote is a coin flip wearing a lab coat. It must not be promoted."""
+    tied = suggest_from_sequence([True, False, True, False])
+    assert not tied.confident
+    assert apply_to_manifest(
+        pd.DataFrame({"clip_id": ["a"], "stance_input": [""]}), suggestions={"a": tied}
+    )[STANCE_COLUMN].isna().all()
+
+    # A majority is readable, and reports its own support.
+    majority = suggest_from_sequence([True, True, True, False])
+    assert majority.stance == "regular" and "3/4" in majority.reason
+
+
+def test_stance_input_is_never_derived_from_published_riding_direction():
+    """`stance_published=regular` means *natural stance*, not goofy-vs-regular.
+
+    The two vocabularies share the word 'regular' and mean different things, and
+    conflating them is the exact corruption the guardrail exists to stop. This
+    asserts the module offers no path from one to the other.
+    """
+    import ast
+    import skateid.stance as stance_module
+
+    # No *code* in the module touches the published column. The AST is used
+    # rather than a text search because the prose above explains, in detail,
+    # exactly why that column must not be read -- and a grep would flag its own
+    # explanation. Only identifiers and string literals outside docstrings count.
+    tree = ast.parse(Path(stance_module.__file__).read_text(encoding="utf-8"))
+    # Collect the *node* holding each docstring, so its text is compared by
+    # identity rather than by value (get_docstring cleans and dedents, so the
+    # value would not match the literal).
+    docstring_nodes = set()
+    for node in ast.walk(tree):
+        if isinstance(
+            node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ) and node.body and isinstance(node.body[0], ast.Expr):
+            value = node.body[0].value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                docstring_nodes.add(id(value))
+    offenders = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and "stance_published" in node.value
+        and id(node) not in docstring_nodes
+    ]
+    assert offenders == [], f"the module reads the published column: {offenders}"
+
+    # And the two columns are independent in practice: 144 SkateAI clips publish
+    # 'regular' with no goofy/regular information recoverable from it.
+    frame = pd.DataFrame(
+        {"clip_id": ["a"], "stance_published": ["regular"], "stance_input": [""]}
+    )
+    assert apply_to_manifest(frame)[STANCE_COLUMN].isna().all()
 
 
 def test_confusion_matrix_folds_low_support_classes_and_stays_readable():
