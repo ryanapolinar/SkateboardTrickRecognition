@@ -1,8 +1,10 @@
 """Tests for data validation, allowlist enforcement, and scope guardrails."""
 
 import json
+import tempfile
 from pathlib import Path
 import sys
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -12,6 +14,16 @@ from skateid.eval import (
     MajorityClassBaseline,
     evaluate_predictions,
     format_confusion_matrix,
+)
+from skateid.features import (
+    EXTRACTOR_VERSION,
+    KEYPOINT_COUNT,
+    KEYPOINT_NAMES,
+    body_features,
+    board_features,
+    cache_key,
+    load_features,
+    save_features,
 )
 from skateid.stance import (
     CONFIDENCE_FLOOR,
@@ -441,6 +453,116 @@ def test_stance_input_is_never_derived_from_published_riding_direction():
         {"clip_id": ["a"], "stance_published": ["regular"], "stance_input": [""]}
     )
     assert apply_to_manifest(frame)[STANCE_COLUMN].isna().all()
+
+
+def _synthetic_pose(scale: float = 1.0, offset: np.ndarray = np.zeros(2)) -> np.ndarray:
+    """A plausible 17-keypoint pose, placed and scaled as requested.
+
+    Laid out so the hips, shoulders and torso are all present -- `body_features`
+    needs the torso length to define its unit, and a fixture without one would
+    exercise only the fallback path.
+    """
+    canonical = {
+        "nose": (0, -0.5), "left_eye": (-0.05, -0.5), "right_eye": (0.05, -0.5),
+        "left_ear": (-0.1, -0.5), "right_ear": (0.1, -0.5),
+        "left_shoulder": (-0.2, 0.0), "right_shoulder": (0.2, 0.0),
+        "left_elbow": (-0.3, 0.3), "right_elbow": (0.3, 0.3),
+        "left_wrist": (-0.35, 0.6), "right_wrist": (0.35, 0.6),
+        "left_hip": (-0.15, 1.0), "right_hip": (0.15, 1.0),
+        "left_knee": (-0.2, 1.5), "right_knee": (0.2, 1.5),
+        "left_ankle": (-0.2, 2.0), "right_ankle": (0.2, 2.0),
+    }
+    out = np.zeros((KEYPOINT_COUNT, 3), dtype=np.float32)
+    for index, name in enumerate(KEYPOINT_NAMES):
+        x, y = canonical[name]
+        out[index, :2] = np.array([x, y]) * scale * 100.0 + offset
+        out[index, 2] = 0.9
+    return out
+
+
+def test_body_features_are_relative_and_record_missingness():
+    """Plan section 7: measure everything relative to the rider, and scale it.
+
+    The point is that camera distance and angle stop mattering, so a feature
+    vector for a skater filling the frame must equal one for a skater far away --
+    that is the whole claim of the representation.
+    """
+    near = _synthetic_pose(scale=1.0, offset=np.array([500.0, 300.0]))
+    far = _synthetic_pose(scale=0.25, offset=np.array([50.0, 80.0]))
+
+    a, b = body_features(near), body_features(far)
+    assert a.shape == (KEYPOINT_COUNT * 3,)
+    assert np.allclose(a, b, atol=0.05), "features must be translation and scale invariant"
+
+    # Confidence is carried per keypoint, so the model can learn to discount an
+    # unreliable one instead of being handed a confident average.
+    assert a[2] > 0 and b[2] > 0
+
+    # An occluded keypoint is recorded as missing (0,0,0), not averaged in. A
+    # smooth, confident-looking coordinate for a hidden elbow is the failure.
+    occluded = near.copy()
+    elbow = KEYPOINT_NAMES.index("left_elbow")
+    occluded[elbow, 2] = 0.05
+    out = body_features(occluded)
+    assert out[elbow * 3 : elbow * 3 + 3].tolist() == [0.0, 0.0, 0.0]
+
+    # An unusable pose returns zeros rather than raising, and the origin/hip
+    # fallback does not divide by zero.
+    assert body_features(np.zeros((17, 3))).shape == (17 * 3,)
+    assert body_features(None).tolist() == [0.0] * (KEYPOINT_COUNT * 3)
+
+
+def test_board_box_carries_location_but_not_rotation():
+    """A COCO skateboard box locates the board; it cannot measure its rotation.
+
+    An axis-aligned box is the same shape for a board tilted 45 deg as for one
+    flat, so it cannot be a rotation signal. This pins down that
+    `board_features` reports location/size and says so, rather than handing a
+    downstream model numbers that look like an angle and are not.
+    """
+    frame_shape = (480, 640, 3)
+    box = np.array([100.0, 50.0, 300.0, 200.0])
+    out = board_features(box, frame_shape)
+    assert out.shape == (5,)
+    assert np.isclose(out[0], 200.0 / 640)   # centre x, normalised
+    assert np.isclose(out[1], 125.0 / 480)   # centre y
+    assert np.isclose(out[2], 200.0 / 640)   # width
+    assert np.isclose(out[3], 150.0 / 480)   # height
+    assert out[4] == 1.0, "visible"
+
+    # No board detected is a visibly empty frame, not a silent zero.
+    missing = board_features(None, frame_shape)
+    assert missing.tolist() == [0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # Rotation is not in there, by design. If this ever becomes true the module's
+    # docstring and the M2 gate both need revisiting.
+    assert len(out) == 5
+
+
+def test_feature_cache_is_keyed_on_the_extractor_version():
+    """M0's cache keyed on clip_id alone and silently reused stale features.
+
+    Every downstream score still came out, so the bug was invisible except as
+    inexplicably flat results. The version is part of the key so that changing the
+    feature definition cannot reuse the previous run's numbers.
+    """
+    assert cache_key("clip1") != cache_key("clip1", EXTRACTOR_VERSION + 1)
+    assert cache_key("clip1") == cache_key("clip1")
+
+    with tempfile.TemporaryDirectory() as directory:
+        cache = Path(directory)
+        key = cache_key("clip1")
+        body = np.arange(6, dtype=np.float32)
+        board = np.arange(5, dtype=np.float32)
+        save_features(cache, key, body, board)
+        loaded = load_features(cache, key)
+        assert np.array_equal(loaded[0], body) and np.array_equal(loaded[1], board)
+
+        # A miss, and a corrupt file, both read as None rather than crashing a
+        # 671-clip pass on clip 400.
+        assert load_features(cache, "nope") is None
+        (cache / f"{key}.npz").write_bytes(b"truncated")
+        assert load_features(cache, key) is None
 
 
 def test_every_trick_can_be_named_for_both_stances():
