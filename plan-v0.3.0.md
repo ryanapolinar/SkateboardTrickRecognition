@@ -565,7 +565,69 @@ correctness signal, not a capability.
 (§3's `auto` stays suggest-only); pose + board extraction; and reinstall torch
 from the CUDA index to use the RTX 3060 rather than the CPU build.
 
-### 12.5 M1 gate revised: 95 % macro-F1 -> 5x the floor (2026-09-28)
+### 12.6 M1 closeout: the gate is NOT met, and the diagnosis (2026-09-28)
+
+| | |
+|---|---|
+| **extraction** | 671/671 clips, 552 s on the RTX 3060, 0 failures, 0.82 s/clip. Mean keypoint fill **0.747**, min 0.074; **624/671** clips usable (>= 50 % of frames with >= 50 % of keypoints) |
+| **pose probe (LR, video-disjoint holdout)** | macro-F1 **0.0406**, accuracy 0.098 |
+| **vs. the VideoMAE floor (0.0401)** | **1.01x** — statistically indistinguishable from a frozen generic probe |
+| **M1 gate** | **NOT MET.** >= 5x was required |
+
+**This is the informative outcome, not a failure of the run.** The gate's failure
+branch exists precisely so that "the features do not carry the signal" is
+discoverable before scaling, and that is what happened.
+
+**The diagnosis is specific, and it is not "the models are bad":**
+
+| probe | holdout macro-F1 |
+|---|---|
+| train macro-F1 | **1.000** |
+| full 12-frame trajectory | 0.0406 |
+| middle frame only | 0.0324 |
+| velocity (d/dt of the trajectory) | 0.055 |
+| PCA-20 | 0.0374 |
+
+A **train F1 of 1.000 against a holdout of 0.041** is the whole story. With
+**612 features and 337 training clips — 1.8 dimensions per sample** — logistic
+regression memorises the training set completely and transfers nothing. Every
+regularisation setting tried (C = 0.001/0.01/0.1) collapses train F1 to ~0.04
+while holdout stays flat, which is the signature of *too little data for this
+representation*, not of a bad solver.
+
+Per-class recall confirms it: **5 of 22 holdout classes score above zero**, and
+those five are the largest (kickflip 0.50, bs_180_heelflip 0.40, fs_bigspin 0.33,
+tre_flip 0.25, heelflip 0.10). Holdout support is brutal — **median 4 clips per
+class, 14 of 22 classes have fewer than 5** — so macro-F1 is mostly a
+low-support tail in which a single clip moves a class by ~0.25.
+
+**What this says about the representation, honestly:** the flattened-trajectory
+vector is the wrong shape for 337 clips. Velocity scored highest (0.055) of all
+probes, which is the *expected* direction for rotation-order signal, but the
+margin over noise is not significant at this sample size. Nothing here shows the
+pose features are wrong; it shows that **a 612-dimensional per-clip vector cannot
+be estimated from 337 clips**, and that micro-averaging accuracy (0.098) is the
+more stable read than a 22-class macro average over 112 clips.
+
+**Carried into the next milestone — in priority order:**
+
+1. **Reduce the dimensionality before adding model capacity.** A small temporal
+   encoder over the pose sequence, or aggressive pooling to rotation-relevant
+   statistics, is the obvious move; 1.8 dims/sample is the problem to fix first.
+2. **The tiny transformer, not an LR on a flat vector.** Plan section 12 called
+   for "pose features + LR -> tiny transformer"; only the LR rung was built, and it
+   is the rung that failed. The transformer shares weights across time and should
+   generalise where an unshared flat vector cannot.
+3. **Board rotation is still unmeasured** and remains the most physically direct
+   signal (M2). A board box is not a rotation, so this is genuinely missing.
+4. **Report accuracy alongside macro-F1** for any small-support evaluation, and
+   consider restricting the Stage-B target set to classes with >= 15 clips (plan
+   section 13 already leans this way) so the metric stops being a tail lottery.
+
+**Not claimed:** no generalisation result. The split is video-disjoint, not
+skater-disjoint, and none of these numbers would support such a claim even had
+they been higher.
+
 
 M1's exit gate previously read ">= 95 % macro-F1 vs. the `skateai` holdout
 floor". That number was written before any holdout macro-F1 had been measured,

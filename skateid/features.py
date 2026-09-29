@@ -231,6 +231,62 @@ def extract_clip(
     return body, board
 
 
+def pose_only_features(cache_dir: Path, key: str) -> Optional[np.ndarray]:
+    """Flatten one clip's cached pose stream into a single feature vector.
+
+    The M1 test of plan section 7 is *temporal*: the claim is that the
+    **trajectory** across the window carries the signal, not any single frame
+    (section 7 says so explicitly, and video.py's sampling is built for it). So
+    the vector is the full sequence flattened, not a per-frame summary -- pooling
+    to a mean here would discard exactly what is being tested.
+
+    Frames are resampled to a fixed length so a clip of any duration produces the
+    same shape, as plan section 7 requires.
+    """
+    loaded = load_features(cache_dir, key)
+    if loaded is None:
+        return None
+    body, _ = loaded
+    if body.size == 0:
+        return None
+    return body.reshape(-1).astype(np.float32)
+
+
+def load_feature_table(
+    manifest: pd.DataFrame,
+    cache_dir: Path,
+    extractor_version: int = EXTRACTOR_VERSION,
+    include_board: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    """Build the ``(X, y, clip_ids)`` design matrix from the feature cache.
+
+    Clips with no cached features are **dropped, not zero-filled**. A missing
+    clip and a clip where the skater was genuinely absent both flatten to zeros,
+    and training on a field of zeros teaches the model that "no data" is a
+    meaningful pose -- which would be a fabricated signal rather than a
+    measured one. The count of dropped clips is the return value's companion
+    concern and is reported by the caller.
+    """
+    features: List[np.ndarray] = []
+    labels: List[str] = []
+    clip_ids: List[str] = []
+    for _, record in manifest.iterrows():
+        vector = pose_only_features(cache_dir, cache_key(record["clip_id"], extractor_version))
+        if vector is None:
+            continue
+        features.append(vector)
+        labels.append(str(record["label"]))
+        clip_ids.append(str(record["clip_id"]))
+    if not features:
+        return np.zeros((0, 0), dtype=np.float32), np.zeros(0, dtype=object), []
+    matrix = np.stack(features)
+    if include_board:
+        loaded = [load_features(cache_dir, cache_key(c, extractor_version)) for c in clip_ids]
+        board = np.stack([item[1].reshape(-1) for item in loaded])
+        matrix = np.concatenate([matrix, board], axis=1)
+    return matrix, np.array(labels, dtype=object), clip_ids
+
+
 def body_quality(body: np.ndarray) -> Dict[str, float]:
     """How much of a clip's pose stream is actually usable.
 

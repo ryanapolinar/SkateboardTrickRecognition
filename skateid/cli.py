@@ -8,6 +8,18 @@ import time
 from pathlib import Path
 import sys
 import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report
+from sklearn.preprocessing import StandardScaler
+
+from skateid.eval import evaluate_predictions, format_confusion_matrix
+from skateid.stance import trick_for_both_stances
+from skateid.taxonomy import Taxonomy
+
+#: Value in the `split_holdout` column meaning "held out". The column holds
+#: train/test; the *published* column is a different partition of the same clips,
+#: so reading the wrong one would score on clips the model trained on.
+HOLDOUT_VALUE = "test"
 
 from skateid.baselines import (
     available_embedders,
@@ -266,6 +278,83 @@ def baselines_cmd(args: argparse.Namespace) -> int:
         print(f"\nWrote {out_path}")
     return 0
 
+
+def probe_cmd(args) -> int:
+    """Score cached pose features against the holdout split. This is M1's gate.
+
+    Pose features flattened in time order, logistic regression, scored on the
+    video-disjoint holdout. The comparison that matters is against the best
+    *measured* holdout score in this project -- VideoMAE at 0.0401 -- not against
+    an absolute number, because the question M1 asks is whether structured
+    features extract more than a frozen generic probe.
+
+    The board stream is opt-in via --with-board. It contributes location and size,
+    not rotation (see features.board_features), so it is measured separately
+    rather than folded into a "pose+board" headline.
+    """
+    from . import features
+
+    frame = pd.read_csv(args.manifest, dtype={"clip_id": str})
+    if args.dataset != "all":
+        frame = frame[frame["dataset"] == args.dataset]
+
+    taxonomy = default_taxonomy()
+    # The split columns hold train/test; "holdout" in this project means the
+    # project's own video-disjoint holdout, which is the `test` value of
+    # split_holdout. Naming it explicitly avoids reading the *published* split,
+    # which is a different partition of the same clips.
+    holdout = frame[frame["split_holdout"] == HOLDOUT_VALUE]
+    if holdout.empty:
+        print(f"error: no rows with split_holdout == {HOLDOUT_VALUE!r} in the manifest", file=sys.stderr)
+        return 2
+
+    cache = Path(args.cache_dir)
+    X_train, y_train, ids_train = features.load_feature_table(
+        frame[frame["split_holdout"] != HOLDOUT_VALUE], cache, include_board=args.with_board
+    )
+    X_test, y_test, ids_test = features.load_feature_table(holdout, cache, include_board=args.with_board)
+    if X_train.size == 0 or X_test.size == 0:
+        print("error: no cached features. Run `skateid extract` first.", file=sys.stderr)
+        return 2
+
+    print(f"pose features: train {X_train.shape}, holdout {X_test.shape}")
+    print(f"classes: train {len(set(y_train))}, holdout {len(set(y_test))}")
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    model = LogisticRegression(max_iter=3000, C=args.c, class_weight="balanced")
+    model.fit(X_train_scaled, y_train)
+    predictions = model.predict(X_test_scaled)
+
+    metrics = evaluate_predictions(y_test, predictions, labels=sorted(set(y_train) | set(y_test)))
+    print()
+    print(f"Accuracy:  {metrics['accuracy']:.4f}")
+    print(f"Macro F1:  {metrics['macro_f1']:.4f}")
+    baseline = 0.0401
+    ratio = metrics["macro_f1"] / baseline if baseline else float("inf")
+    print(f"vs VideoMAE floor {baseline}: {ratio:.2f}x  "
+          f"(M1 gate is >= 5.0x, i.e. >= {5 * baseline:.4f})")
+    print(f"GATE: {'MET' if ratio >= 5 else 'NOT MET'} -- "
+          f"{'features beat the frozen probe' if ratio >= 5 else 'stop and fix features before scaling'}")
+    print()
+    print(format_confusion_matrix(metrics["confusion_matrix"], metrics["labels"], max_labels=12))
+    print()
+    print(classification_report(y_test, predictions, zero_division=0))
+
+    # A model with no stance input must not be able to name a trick uniquely. If
+    # it could, the sign convention is leaking in from somewhere else.
+    print("stance-blind naming (what the UI would show without a toggle):")
+    shown = 0
+    for clip_id, truth, guess in list(zip(ids_test, y_test, predictions))[:args.examples]:
+        pair = trick_for_both_stances(guess, taxonomy)
+        goofy = pair["goofy"] or "?"
+        print(f"  {clip_id[:52]:<52} true={truth:<18} -> {guess}  |  goofy: {goofy}")
+        shown += 1
+    return 0
+
+
 def extract_cmd(args) -> int:
     """Run pose + board extraction over the manifest and cache the result."""
     from . import features
@@ -457,6 +546,18 @@ def main() -> int:
         "(other). 0 prints every class (very wide past ~10 classes).",
     )
 
+    probe_p = subparsers.add_parser(
+        "probe", help="Score cached pose features against the holdout split (M1's gate)"
+    )
+    probe_p.add_argument("--manifest", default="data/manifest.csv", help="Path to manifest CSV")
+    probe_p.add_argument("--dataset", choices=["all", "skateboardml", "skateai"], default="skateai",
+                         help="Restrict to one dataset (default: skateai, the only source with enough classes)")
+    probe_p.add_argument("--cache-dir", default="data/cache", help="Feature cache directory")
+    probe_p.add_argument("--with-board", action="store_true", help="Also use the board box stream")
+    probe_p.add_argument("--c", type=float, default=1.0, help="Logistic regression C")
+    probe_p.add_argument("--examples", type=int, default=6, help="How many per-clip examples to print")
+    probe_p.add_argument("--out", default="", help="Optional path to write the metrics as JSON")
+
     extract_p = subparsers.add_parser(
         "extract", help="Extract pose + board features for every clip and cache them"
     )
@@ -545,6 +646,8 @@ def main() -> int:
         return stance_cmd(args)
     elif args.command == "extract":
         return extract_cmd(args)
+    elif args.command == "probe":
+        return probe_cmd(args)
     return 0
 
 if __name__ == "__main__":
