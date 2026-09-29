@@ -35,14 +35,12 @@ dev = [
     "pytest>=8.0",
 ]
 deeplearning = [
-    # M1 runs on the RTX 3060, so torch comes from the CUDA index, not PyPI:
-    #   pip install --index-url https://download.pytorch.org/whl/cu128 \
-    #       torch==2.11.0+cu128 torchvision==0.26.0+cu128
-    # 2.11 is the newest CUDA 12.8 build the index publishes; the PyPI CPU wheel
-    # is 2.14, so enabling CUDA is a *downgrade*. The >=2.6 floor below still
-    # holds, but `skateid doctor` should report which build is actually loaded,
-    # because a CPU wheel here is silent -- it just runs everything ~20x slower
-    # and the scores still come out, looking like a modelling result.
+    # M1 runs on the RTX 3060. Install torch from the CUDA index, NOT PyPI:
+    #   pip install --index-url https://download.pytorch.org/whl/cu130 \
+    #       torch==2.14.0+cu130 torchvision==0.29.0+cu130
+    # cu130 is the index that matches the current PyPI torch (2.14); the older
+    # cu128 index stops at 2.11, so using it would silently downgrade. Pick the
+    # index whose newest version equals the PyPI version, or lower.
     "torch>=2.6",
     "torchvision>=0.21",
     "ultralytics>=8.3",

@@ -527,8 +527,9 @@ def build_vlm_prompt(
     direction is a fact about the clip, so it is stated directly. The resolved
     goofy/regular stance is a *sign-frame* declaration, so naming it is meaningful:
     it tells the model which way "kick" and "backside" are being read, which is
-    precisely the failure this project cares about. When it is empty (it is,
-    until M1) the prompt says so instead of implying a default.
+    precisely the failure this project cares about. When it is empty -- which it
+    is for every clip today -- the prompt asks for the stance-ambiguous pair rather
+    than inviting a guess, because the mirror is a bijection and both names exist.
     """
     options = ", ".join(taxonomy.dictionary.expressible_names())
     riding = f" {stance_published}" if stance_published else ""
@@ -538,7 +539,14 @@ def build_vlm_prompt(
             " are from that foot position."
         )
     else:
-        clause = " Stance is not given; answer using the rider's likely foot position."
+        # Not "answer using the rider's likely foot position" -- that invites the
+        # guess this project refuses to make. Naming both readings lets the model
+        # report the pair, and the stance later selects between them.
+        clause = (
+            " Stance is NOT given and must not be guessed. If the trick you see has a"
+            " different name for a goofy rider (a kickflip is a heelflip for one), answer"
+            " with both names as 'regular/goofy', most likely first."
+        )
     return VLM_PROMPT_TEMPLATE.format(
         count="{count}", riding=riding, stance_clause=clause, options=options
     )

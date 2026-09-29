@@ -324,14 +324,44 @@ The manifest keeps the two concepts in **separate columns**:
 | `stance_published` | `regular`, `switch`, `fakie`, `nollie` | riding direction / pop type, exactly as the dataset published it. **Provenance only** — none of these can fix the sign frame, and `fakie` is a direction, not a foot forward |
 | `stance_input` | `regular`, `goofy`, or empty | the resolved goofy/regular toggle that selects the sign frame |
 
-`stance_input` is **empty on every row today**, because there is no feature
-extractor yet (M1). That is the honest state: guessing it wrong silently mirrors
-every sign, swapping kick↔heel and fs↔bs across the whole dataset, so an empty
-value is strictly better than a plausible-looking wrong one.
+`stance_input` is **empty on every row today**, because the goofy/regular toggle is an
+*input*, not something the data can supply. Guessing it wrong silently mirrors every
+sign, swapping kick↔heel and fs↔bs across the whole dataset, so an empty value is
+strictly better than a plausible-looking wrong one.
 
-The guardrail enforces this. `stance_input` must be `regular`/`goofy`/empty, and a
-**riding direction copied into it is a separate, named violation** — because that
-mistake is not a schema error, it is a silent sign flip on the data.
+`stance_published` is emphatically **not** a fallback. It is human-labelled, but it
+labels a *different thing*: `fakie`/`switch`/`nollie` are riding directions, and a
+*fakie kickflip* and a *regular kickflip* are the same trick. The crosstab shows the
+column is orthogonal to the stance question — every direction contains both
+kickflips and heelflips:
+
+```
+stance_published   kickflip  heelflip
+fakie                    13        10
+nollie                   12        13
+regular                   8         4
+switch                    6         9
+```
+
+So the stance question is answered three ways, in order of preference:
+
+| | |
+|---|---|
+| **both readings** (default) | `stance.trick_for_both_stances()` names the trick under each stance. This works because the mirror is a **bijection** — all 41 expressible names mirror to a named partner, 0 orphans — so a kickflip clip is evidence about `{kickflip, heelflip}` and both names are exact |
+| **a confirmed stance** | `skateid stance --set <clip>=goofy`, when a human knows. The toggle then selects one of the two |
+| **never** | inferring it from `stance_published` |
+
+Run `skateid stance` to see both readings for the manifest's most common tricks. It
+also flags tricks that are *stance-independent* — `ollie` is named the same either
+way, so the toggle cannot affect it.
+
+A lead-foot heuristic can *suggest* a stance (`stance.suggest_from_sequence`), but it
+can never write one: even a unanimous 16-frame vote caps at 0.75 confidence, below
+the 0.8 floor, because the cost of a wrong stance is a systematic sign flip.
+
+The guardrail enforces all of this. `stance_input` must be `regular`/`goofy`/empty,
+and a **riding direction copied into it is a separate, named violation** — because
+that mistake is not a schema error, it is a silent sign flip on the data.
 
 `Rotation.mirrored()` exposes the operation (negating all three axes *is* the
 geometric mirror), and `Taxonomy.name_for_mirrored()` names the result or returns

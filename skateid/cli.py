@@ -16,6 +16,7 @@ from skateid.baselines import (
     run_b2,
     vlm_names,
 )
+from skateid.taxonomy import Taxonomy
 from skateid.data import (
     build_manifest,
     default_taxonomy,
@@ -302,12 +303,30 @@ def stance_cmd(args) -> int:
     summary = stance_module.stance_summary(updated)
     print(f"stance: {summary['confirmed']}/{summary['rows']} clips confirmed, "
           f"{summary['empty']} empty ({summary['goofy']} goofy, {summary['regular']} regular)")
-    if summary["confirmed"] == 0:
-        print(
-            "stance_input is empty everywhere. That is expected: the goofy/regular toggle is an\n"
-            "input (plan section 3), not something the published riding direction can supply.\n"
-            "Confirm per clip with:  skateid stance --set <clip_id>=goofy"
-        )
+
+    taxonomy = Taxonomy.load(args.tricks, args.allowlist)
+    print()
+    print("stance_published is riding direction (fakie/switch/nollie), NOT goofy-vs-regular.")
+    print("A 'fakie kickflip' and a 'regular kickflip' are the same trick, so the published")
+    print("column cannot fix the sign frame and is never used as a fallback. It carries no")
+    print("information about which foot leads -- every direction contains both kickflips")
+    print("and heelflips.")
+    print()
+
+    # Both-stances output: the honest default answer. Rather than guessing, name
+    # the trick under both readings; the stance only selects between them.
+    if args.label:
+        labels = [item.strip() for item in args.label.split(",") if item.strip()]
+    else:
+        labels = frame["label"].value_counts().head(args.top).index.astype(str).tolist()
+
+    print(f"top {len(labels)} tricks, named under both stances:")
+    width = max(len(str(label)) for label in labels) + 2
+    for label in labels:
+        result = stance_module.trick_for_both_stances(label, taxonomy)
+        goofy = result["goofy"] or "(unnamed mirror)"
+        marker = "" if result["stance_dependent"] else "  <- same name either way"
+        print(f"  {str(label):<{width}}{result['regular']:<18}regular{'':<4}| goofy:{goofy}{marker}")
     return 0
 
 
@@ -417,6 +436,17 @@ def main() -> int:
         metavar="CLIP_ID=STANCE",
         help="Confirm a stance for one clip, e.g. --set clip_0001=goofy. Repeatable. "
         "This is the only path that writes a value.",
+    )
+    stance_p.add_argument(
+        "--label",
+        default="",
+        help="Comma-separated trick names to show under both stances (default: the most "
+        "common labels in the manifest)",
+    )
+    stance_p.add_argument("--top", type=int, default=8, help="How many labels to show by default")
+    stance_p.add_argument("--tricks", default="data/tricks.json", help="Path to the rotation dictionary")
+    stance_p.add_argument(
+        "--allowlist", default="data/flatground_allowlist.csv", help="Path to the name registry"
     )
 
     args = parser.parse_args()
