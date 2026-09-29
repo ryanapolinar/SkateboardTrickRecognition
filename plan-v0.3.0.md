@@ -794,9 +794,82 @@ produce a number built on a feature this oracle has just shown to be uninformati
 which is precisely the kind of plausible-wrong score this project keeps refusing to
 publish.
 
-**Tooling delivered regardless** (all reusable if option 1-3 works):
-`skateid oracle`, `segment_board`, `board_axis_angle`, `board_corners`,
-`unwrap_angles`, `net_sweep`. Tests: 48 -> **52**.
+### 12.9 M2 step 1b: 60 frames, and a learned segmenter — both fail (2026-09-28)
+
+§12.8 listed four options. The two cheapest and most promising were tried:
+**more frames** (option 1) and **a learned segmenter** (option 3). Neither works.
+
+**Option 1 — 60 frames instead of 12** (`skateid oracle --frames 60`):
+
+| | 12 frames | 60 frames |
+|---|---|---|
+| angle coverage | 67.6 % | 67.7 % (**unchanged**) |
+| kick-family correct sign | 5 % | **0 %** |
+| heel-family correct sign | 50 % | **92 %** |
+| kick − heel separation | -20 deg | -39 deg |
+
+More frames **halved** the kick-family result. Coverage did not move at all, which
+rules out undersampling as the cause. (The heel-family jump to 92 % is real but
+*not* progress: heel clips are the ones where the board is briefly flat and
+readable, so a denser sample catches that; kick clips never produce a usable
+reading at any density.)
+
+**Option 3 — `yolo11n-seg.pt` instead of Otsu.** The segmenter finds the board far
+more often — **101/120 frames (84 %)** — which makes it look like a clear upgrade.
+It is not:
+
+| arm | kick correct | heel correct | separation | overall |
+|---|---|---|---|---|
+| Otsu, 12 frames | 5 % | 50 % | -20 deg | 41 % |
+| Otsu, 60 frames | 0 % | 92 % | -39 deg | 51 % |
+| **YOLO-seg, 60 frames** | 10 % | 21 % | +10 deg | **35 %** |
+
+The learned segmenter is the **worst** of the three.
+
+**The actual cause, found by looking at the masks.** A debug crop of a mid-flip
+kickflip shows the problem directly: the board occupies a small part of its own
+detection box, the rider's shoes are inside that box, and the board is **motion
+blurred against a similarly-toned background**. Across five representative clips
+and 117 measurements the angle took only **7 distinct values**:
+
+```
+{0: 93, -90: 19, 38: 1, 74: 1, 86: 1, -88: 1, -74: 1}
+```
+
+**93 of 117 readings are exactly 0 and 19 are exactly -90.** The median mask aspect
+ratio is **0.62** — a near-square blob, not a board, which is a 4:1 shape. So the
+segmentation is returning *shoes and shadow* rather than the deck, and the
+rectangle is fitting the wrong object entirely. Per-frame, the angle sits at
+**exactly -90.0** in nearly every frame regardless of what the board is doing.
+
+**So the diagnosis in §12.8 was wrong, and the correction matters.** It is not
+"a third of frames are missing and the gaps break the sweep". Coverage is not the
+issue. The issue is that **most of the readings that do exist are not measurements
+of the board at all**, and they are being treated as measurements. A sweep built
+from them is arithmetic on noise.
+
+**This is now a data problem, not a code problem.** The extractor is verified exact
+on synthetic input (0.02 deg) and the geometry is right; what is missing is a
+segmentation that actually isolates a skateboard deck in a 640 px, blurred,
+low-contrast, partially-occluded competition frame. Options 1 and 3 from §12.8 are
+both spent. What remains:
+
+1. **Upscale the crop before segmenting** (option 2, untried) — the board is
+   ~50 px long in these frames; a 3-4x crop gives the mask something to hold.
+2. **SAM as §6 actually specifies** — prompt with the detection box, which is the
+   setting SAM is built for. Distinct from YOLO-seg: SAM is prompted, not trained
+   on COCO's 80 classes, and does not have to guess "skateboard" from a
+   fixed vocabulary.
+3. **Accept the finding and change the plan.** If no off-the-shelf route produces a
+   trustworthy deck angle, the honest conclusion is that this representation needs
+   either hand-labelled board corners (a few hundred clips) or a purpose-trained
+   detector — both real projects, and both outside what "1-2 days" covers.
+
+**Not claimed:** no M2 result, and `probe --with-board` still deliberately not
+run. The gate is not evaluated.
+
+**Tooling added:** `skateid oracle --segmenter` so the comparison is reproducible.
+
 
 
 - Stance-prefixed names in output? **Default: no in v1** — stance is an input, not a rename.
@@ -841,3 +914,5 @@ later reader distinguish a considered revision from a moving target. The file st
   pre-fill (never trusted for the sign); a genuinely reliable stance auto-detect is future work.
 
 ---
+
+**Tooling delivered regardless** (all reusable if option 1-3 works):

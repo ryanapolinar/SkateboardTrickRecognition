@@ -281,6 +281,39 @@ def baselines_cmd(args: argparse.Namespace) -> int:
     return 0
 
 
+def _segmented_angle(model, image, device: int):
+    """Board angle from a YOLO *segmentation* mask, or ``None``.
+
+    Used by ``skateid oracle --segmenter``. Kept as a comparison arm rather than
+    the default: it finds the board more often than Otsu (12.8/12.9), which makes
+    it look like an upgrade, but the measured angle is no better. The evidence
+    for that is in plan 12.9; the flag exists so the claim can be re-checked when
+    the models are updated.
+    """
+    import cv2
+
+    result = model.predict(image, verbose=False, device=device)[0]
+    if result.masks is None or result.boxes is None:
+        return None
+    best, best_conf = None, 0.25
+    for mask, cls, conf in zip(result.masks.data, result.boxes.cls, result.boxes.conf):
+        if model.names[int(cls)] != "skateboard" or float(conf) <= best_conf:
+            continue
+        best, best_conf = mask, float(conf)
+    if best is None:
+        return None
+    binary = (best.cpu().numpy() > 0.5).astype(np.uint8)
+    points = cv2.findNonZero(binary)
+    if points is None or len(points) < 4:
+        return None
+    (_, _), (w, h), angle = cv2.minAreaRect(points)
+    if w < 2 or h < 2:
+        return None
+    if w < h:
+        angle += 90.0
+    return float((angle + 90.0) % 180.0 - 90.0)
+
+
 def oracle_cmd(args) -> int:
     """M2's oracle check: does the measured board angle track the real rotation?
 
@@ -308,6 +341,10 @@ def oracle_cmd(args) -> int:
 
     device = 0 if torch.cuda.is_available() else "cpu"
     board_model = YOLO("yolo11n.pt").to(device)
+    # Optional learned segmenter. Section 12.9 shows it detects the board far more
+    # often than Otsu does, and that this does NOT rescue the angle -- but it is
+    # exposed so that result is reproducible rather than a one-off observation.
+    seg_model = YOLO(args.segmenter).to(device) if args.segmenter else None
 
     rows = []
     for _, record in frame.iterrows():
@@ -317,8 +354,10 @@ def oracle_cmd(args) -> int:
             continue
         angles = []
         for image in batch:
-            box = features.detect_board(board_model, image, device=device)
-            angles.append(features._measure_angle(image, box))
+            if seg_model is not None:
+                angles.append(_segmented_angle(seg_model, image, device))
+            else:
+                angles.append(features._measure_angle(image, features.detect_board(board_model, image, device=device)))
         usable = [a for a in angles if a is not None]
         sweep = features.net_sweep(usable) if len(usable) >= 2 else 0.0
         rows.append({
@@ -641,6 +680,10 @@ def main() -> int:
     oracle_p.add_argument("--limit", type=int, default=0, help="Cap total clips")
     oracle_p.add_argument("--show", type=int, default=20, help="Rows to print")
     oracle_p.add_argument("--out", default="data/oracle_board.csv", help="Where to write the report")
+    oracle_p.add_argument(
+        "--segmenter", default="", help="Use a YOLO *segmentation* model for the board mask "
+        "(e.g. yolo11n-seg.pt) instead of Otsu thresholding",
+    )
 
     probe_p = subparsers.add_parser(
         "probe", help="Score cached pose features against the holdout split (M1's gate)"
