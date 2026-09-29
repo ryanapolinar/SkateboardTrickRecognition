@@ -677,29 +677,6 @@ rate ceiling before it is used as a gate.
 
 ---
 
-## 13. Risks & mitigations
-
-| Risk | Mitigation |
-|---|---|
-| Public-clip near-duplicates inflate scores | hash + perceptual dedup; skater/source-disjoint split; report both splits. **Neither dataset supplies a genuine skater-disjoint split**: SkateboardML has no skater labels (tiny pool of people), so its `split_holdout` is a placeholder; SkateAI's is source-video-disjoint but not skater-disjoint, because BATB is a 1v1 bracket that never records which of the two competitors performed a clip and competitors recur across battles |
-| Oblique/vertical camera makes board roll ambiguous | skater-relative features, stance normalisation, mirrored aug, capture guide in README; the sign convention is checked in `--debug` |
-| **Wrong/unknown stance -> kick<->heel, fs<->bs mirror** | default `auto` (suggest-only, never trusted); user overrides to goofy/regular; show the stance on the page + output; verify the sign in `--debug` |
-| Tiny data overfits | ~0.5 M-param model, LR floor, heavy aug, early-stop on clean val |
-| Partial/over-rotation mislabeled confident | rotation-residual -> "not sure" (§8); `landed` bail suppression |
-| **BATB footage copyrighted** | personal/research use; never redistributed; not shipped in checkpoints; commercial use needs own filming |
-| **Swinburne CC BY-NC / CC BY-NC-ND** | vocabulary only; neither CSV bundled |
-| **ultralytics AGPL-3.0** | fine for personal/research; if permissive needed, swap `pose.py` behind the API to RTMPose/MMPose (Apache-2.0) |
-| `yt-dlp` / YouTube volatility | cutter is ~20 lines and re-runnable; fall back to own filming |
-| Label disputes (names/phrasing) | `tricks.json` versioned; the name is *derived* — the three rotation outputs are ground truth |
-| Trick clipped / skater leaves frame | quality flag + abstain; require >= 80 % frame coverage |
-
----
-
-## 14. Open questions (defaults chosen; revisit when data says so)
-- Stance toggle default? **Default: auto (suggest-only)**; must still resolve to the correct
-  goofy/regular before kick/heelflip & fs/bs are named.
-- Trustworthy auto-detect stance? **Deferred.** v1 ships `auto` only as a suggest-and-override
-  pre-fill (never trusted for the sign); a genuinely reliable stance auto-detect is future work.
 ### 12.7 Gates restructured: why pose alone cannot be the M1 gate (2026-09-28)
 
 §12.5 measured pose-only at **1.01x** the frozen-embedder floor. Before reading that
@@ -766,3 +743,27 @@ later reader distinguish a considered revision from a moving target. The file st
   Stage B validation; the tail stays representable via the three rotation outputs.
 - Re-introduce pop-shuvit as its own label? **Default: no for v1**; revisit only if airtime
   ends up separable and someone asks for the distinction.
+
+## 13. Risks & mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Public-clip near-duplicates inflate scores | hash + perceptual dedup; skater/source-disjoint split; report both splits. **Neither dataset supplies a genuine skater-disjoint split**: SkateboardML has no skater labels (tiny pool of people), so its `split_holdout` is a placeholder; SkateAI's is source-video-disjoint but not skater-disjoint, because BATB is a 1v1 bracket that never records which of the two competitors performed a clip and competitors recur across battles |
+| Oblique/vertical camera makes board roll ambiguous | skater-relative features, stance normalisation, mirrored aug, capture guide in README; the sign convention is checked in `--debug` |
+| **Wrong/unknown stance -> kick<->heel, fs<->bs mirror** | default `auto` (suggest-only, never trusted); user overrides to goofy/regular; show the stance on the page + output; verify the sign in `--debug` |
+| Tiny data overfits | ~0.5 M-param model, LR floor, heavy aug, early-stop on clean val |
+| Partial/over-rotation mislabeled confident | rotation-residual -> "not sure" (§8); `landed` bail suppression |
+| **BATB footage copyrighted** | personal/research use; never redistributed; not shipped in checkpoints; commercial use needs own filming |
+| **Swinburne CC BY-NC / CC BY-NC-ND** | vocabulary only; neither CSV bundled |
+| **ultralytics AGPL-3.0** | fine for personal/research; if permissive needed, swap `pose.py` behind the API to RTMPose/MMPose (Apache-2.0) |
+| `yt-dlp` / YouTube volatility | cutter is ~20 lines and re-runnable; fall back to own filming |
+| Label disputes (names/phrasing) | `tricks.json` versioned; the name is *derived* — the three rotation outputs are ground truth |
+| Trick clipped / skater leaves frame | quality flag + abstain; require >= 80 % frame coverage |
+
+---
+
+## 14. Open questions (defaults chosen; revisit when data says so)
+- Stance toggle default? **Default: auto (suggest-only)**; must still resolve to the correct
+  goofy/regular before kick/heelflip & fs/bs are named.
+- Trustworthy auto-detect stance? **Deferred.** v1 ships `auto` only as a suggest-and-override
+  pre-fill (never trusted for the sign); a genuinely reliable stance auto-detect is future work.
