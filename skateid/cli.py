@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 import sys
 import pandas as pd
@@ -265,6 +266,70 @@ def baselines_cmd(args: argparse.Namespace) -> int:
         print(f"\nWrote {out_path}")
     return 0
 
+def extract_cmd(args) -> int:
+    """Run pose + board extraction over the manifest and cache the result."""
+    from . import features
+
+    frame = pd.read_csv(args.manifest, dtype={"clip_id": str})
+    if args.dataset != "all":
+        frame = frame[frame["dataset"] == args.dataset]
+    if args.limit:
+        frame = frame.head(args.limit)
+
+    import torch
+
+    device = 0 if torch.cuda.is_available() else "cpu"
+    print(f"extracting {len(frame)} clips on {'cuda' if device == 0 else 'cpu'}")
+
+    pose_model = features.load_pose_model(args.pose_model, device=device)
+    board_model = None
+    if not args.no_board:
+        from ultralytics import YOLO
+
+        board_model = YOLO(args.board_model).to(device)
+    if pose_model is None and board_model is None:
+        print("error: no models available (is ultralytics installed?)", file=sys.stderr)
+        return 2
+
+    cache = Path(args.cache_dir)
+    rows, done, failed = [], 0, []
+    started = time.time()
+    for _, record in frame.iterrows():
+        key = features.cache_key(record["clip_id"], features.EXTRACTOR_VERSION)
+        cached = features.load_features(cache, key)
+        if cached is not None:
+            body, board = cached
+        else:
+            try:
+                body, board = features.extract_clip(
+                    record["clip_id"], Path(record["file_path"]), pose_model, board_model,
+                    frames=args.frames, device=device,
+                )
+                features.save_features(cache, key, body, board)
+            except (OSError, ValueError) as error:
+                failed.append((record["clip_id"], str(error)))
+                continue
+        done += 1
+        quality = features.body_quality(body)
+        rows.append({"clip_id": record["clip_id"], "label": record["label"],
+                     "split_holdout": record.get("split_holdout", ""), **quality})
+
+    report = pd.DataFrame(rows)
+    report.to_csv(args.out, index=False)
+    elapsed = time.time() - started
+
+    print(f"extracted {done}/{len(frame)} in {elapsed:.0f}s ({elapsed / max(done, 1):.2f}s/clip)")
+    if failed:
+        print(f"WARNING: {len(failed)} clips failed and were skipped, e.g. {failed[:3]}")
+    if not report.empty:
+        print(f"keypoint fill: mean {report['keypoint_fill'].mean():.3f}, "
+              f"min {report['keypoint_fill'].min():.3f}")
+        print(f"usable clips (>=50% frames with >=50% keypoints): "
+              f"{int(report['usable'].sum())}/{len(report)}")
+    print(f"wrote quality report to {args.out}")
+    return 0
+
+
 def stance_cmd(args) -> int:
     """Set or report the goofy/regular toggle.
 
@@ -392,6 +457,22 @@ def main() -> int:
         "(other). 0 prints every class (very wide past ~10 classes).",
     )
 
+    extract_p = subparsers.add_parser(
+        "extract", help="Extract pose + board features for every clip and cache them"
+    )
+    extract_p.add_argument("--manifest", default="data/manifest.csv", help="Path to manifest CSV")
+    extract_p.add_argument(
+        "--dataset", choices=["all", "skateboardml", "skateai"], default="all",
+        help="Restrict to one dataset",
+    )
+    extract_p.add_argument("--cache-dir", default="data/cache", help="Where to write .npz features")
+    extract_p.add_argument("--out", default="data/feature_quality.csv", help="Quality report CSV")
+    extract_p.add_argument("--frames", type=int, default=12, help="Frames sampled per clip")
+    extract_p.add_argument("--pose-model", default="yolo11n-pose.pt", help="Pose model weights")
+    extract_p.add_argument("--board-model", default="yolo11n.pt", help="Board detection model weights")
+    extract_p.add_argument("--no-board", action="store_true", help="Skip the board stream (pose only)")
+    extract_p.add_argument("--limit", type=int, default=None, help="Cap clips (smoke test)")
+
     validate_p = subparsers.add_parser(
         "validate", help="Check a manifest against the flatground scope guardrail"
     )
@@ -462,6 +543,8 @@ def main() -> int:
         return baselines_cmd(args)
     elif args.command == "stance":
         return stance_cmd(args)
+    elif args.command == "extract":
+        return extract_cmd(args)
     return 0
 
 if __name__ == "__main__":

@@ -42,12 +42,16 @@ KEYPOINT_MIN_CONF = 0.3
 EXTRACTOR_VERSION = 1
 
 
-def load_pose_model(name: str = "yolo11n-pose.pt", device: Optional[str] = None):
+def load_pose_model(name: str = "yolo11n-pose.pt", device: Optional[object] = None):
     """Load a YOLO pose model, on the GPU when one is present.
 
-    Returns ``None`` rather than raising if the weights cannot be fetched, so a
-    caller can report "pose extraction unavailable" instead of crashing a
-    pipeline mid-run. Ultralytics downloads weights on first use.
+    ``device`` is passed through to ultralytics unchanged. It must be an ``int``
+    (0) or a torch device string ("cuda"); ultralytics rejects the string "0",
+    so this deliberately does not stringify a caller that already chose right.
+
+    Returns ``None`` rather than raising if ultralytics is missing, so a caller
+    can report "pose extraction unavailable" instead of crashing mid-run. Weights
+    download on first use.
     """
     try:
         from ultralytics import YOLO
@@ -58,7 +62,7 @@ def load_pose_model(name: str = "yolo11n-pose.pt", device: Optional[str] = None)
     if device is None:
         import torch
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = 0 if torch.cuda.is_available() else "cpu"
     return model.to(device)
 
 
@@ -176,6 +180,78 @@ def load_features(cache_dir: Path, key: str) -> Optional[Tuple[np.ndarray, np.nd
         # A truncated .npz from an interrupted run must read as a miss, not crash
         # a 671-clip pass on clip 400.
         return None
+
+
+def extract_clip(
+    clip_id: str,
+    path: Path,
+    pose_model,
+    board_model,
+    frames: int = 12,
+    size: Tuple[int, int] = (640, 640),
+    device: int = 0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Extract one clip's body and board streams.
+
+    Frames are decoded at ``size`` and passed to the models one at a time: ultralytics
+    rejects an ``(N, H, W, 3)`` array as a single image, so a batch needs the list
+    form and explicit streaming, which also keeps peak VRAM flat over 671 clips.
+
+    A frame where nothing is detected yields a zero row, not a skipped frame. The
+    sequence length is fixed, so "the model found nothing here" stays a value the
+    downstream model can see rather than a shift in time alignment.
+    """
+    from .video import sample_frames
+
+    batch = sample_frames(path, count=frames, size=size)
+    body = np.zeros((frames, KEYPOINT_COUNT * 3), dtype=np.float32)
+    board = np.zeros((frames, 5), dtype=np.float32)
+
+    for index, frame in enumerate(batch):
+        if pose_model is not None:
+            result = pose_model.predict(frame, verbose=False, device=device)[0]
+            keypoints = None
+            if result.keypoints is not None and len(result.keypoints.data):
+                keypoints = result.keypoints.data[0].cpu().numpy()
+                # Several people can appear in a competition frame; the largest is
+                # the one performing. Sorting by box area rather than confidence,
+                # because a confident background spectator is still not the subject.
+                if len(result.keypoints.data) > 1 and result.boxes is not None and len(result.boxes):
+                    areas = result.boxes.conf.cpu().numpy() * 0  # placeholder, see below
+                    widths = (result.boxes.xyxy[:, 2] - result.boxes.xyxy[:, 0]).cpu().numpy()
+                    heights = (result.boxes.xyxy[:, 3] - result.boxes.xyxy[:, 1]).cpu().numpy()
+                    largest = int((widths * heights).argmax())
+                    keypoints = result.keypoints.data[largest].cpu().numpy()
+            body[index] = body_features(keypoints)
+
+        if board_model is not None:
+            box = detect_board(board_model, frame, device=device)
+            board[index] = board_features(box, frame.shape)
+
+    return body, board
+
+
+def body_quality(body: np.ndarray) -> Dict[str, float]:
+    """How much of a clip's pose stream is actually usable.
+
+    Reported per clip so a low number is visible before training, rather than
+    showing up as a mysteriously weak model. A clip where the skater leaves frame
+    has no signal to learn from, and that should be a decision, not a mystery.
+    """
+    if body.size == 0:
+        return {"frames": 0.0, "keypoint_fill": 0.0, "mean_confidence": 0.0, "usable": False}
+    confidences = body[:, 2::3]
+    filled = float((confidences > 0).mean())
+    mean_conf = float(confidences[confidences > 0].mean()) if (confidences > 0).any() else 0.0
+    # A frame counts as usable when at least half the keypoints are present.
+    per_frame = (confidences > 0).sum(axis=1)
+    good_frames = float((per_frame >= KEYPOINT_COUNT / 2).mean())
+    return {
+        "frames": float(body.shape[0]),
+        "keypoint_fill": filled,
+        "mean_confidence": mean_conf,
+        "usable": bool(good_frames >= 0.5),
+    }
 
 
 def body_features(keypoints: np.ndarray) -> np.ndarray:
