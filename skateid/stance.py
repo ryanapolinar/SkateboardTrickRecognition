@@ -31,7 +31,7 @@ from typing import List, Mapping, Optional
 
 import pandas as pd
 
-from .taxonomy import STANCE_VALUES
+from .taxonomy import STANCE_VALUES, Taxonomy
 
 #: Column holding the confirmed goofy/regular toggle. Empty means "unknown", and
 #: unknown is a supported, meaningful state.
@@ -183,6 +183,43 @@ def apply_to_manifest(
     out[STANCE_COLUMN] = confirmed.where(confirmed.notna(), existing)
     out[STANCE_COLUMN] = out[STANCE_COLUMN].replace("", pd.NA)
     return out
+
+
+def trick_for_both_stances(label: object, taxonomy: Taxonomy) -> dict:
+    """Return the trick name as read by a regular and a goofy rider.
+
+    The ambiguity is a clean binary, and this project already made it tractable:
+    the stance mirror is a **bijection** over all 41 rotation-expressible names
+    (verified: 41 named, 0 unmirrored), so every trick has an exact partner name
+    to give. That makes "which trick is it?" answerable *up to* the stance
+    question, which is a far better failure mode than guessing.
+
+    This is deliberately **not** a guess. A clip of one rider doing a kickflip is
+    evidence about ``{kickflip, heelflip}`` and cannot distinguish the two without
+    knowing which foot leads. Returning both, labelled, is the honest answer and
+    costs nothing extra to compute -- it is one dictionary lookup on a map the
+    taxonomy already builds.
+
+    ``unresolved`` is returned when the mirror has no name (which cannot happen
+    for the current dictionary, but is checked rather than assumed, because the
+    whole point of this project is not assuming).
+    """
+    canonical = taxonomy.normalize_label(label)
+    rotation = taxonomy.rotation_for_label(canonical)
+    mirrored = taxonomy.name_for_mirrored(rotation)
+
+    by_stance = {"regular": canonical, "goofy": None}
+    if mirrored is not None:
+        by_stance["goofy"] = mirrored
+    return {
+        "label": canonical,
+        "regular": canonical,
+        "goofy": mirrored,
+        # True when the two stances are actually distinguishable by name, i.e.
+        # the mirror is a different trick and not the same one relabelled.
+        "stance_dependent": mirrored is not None and mirrored != canonical,
+        "unresolved": mirrored is None,
+    }
 
 
 def stance_summary(frame: pd.DataFrame) -> dict:

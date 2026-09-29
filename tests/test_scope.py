@@ -21,6 +21,7 @@ from skateid.stance import (
     apply_to_manifest,
     suggest_from_land_foot,
     suggest_from_sequence,
+    trick_for_both_stances,
 )
 from skateid.taxonomy import ROTATION_COLUMNS, Rotation, ScopeError, Taxonomy
 
@@ -440,6 +441,39 @@ def test_stance_input_is_never_derived_from_published_riding_direction():
         {"clip_id": ["a"], "stance_published": ["regular"], "stance_input": [""]}
     )
     assert apply_to_manifest(frame)[STANCE_COLUMN].isna().all()
+
+
+def test_every_trick_can_be_named_for_both_stances():
+    """The stance ambiguity is a clean binary, and it is fully answerable.
+
+    Rather than guessing goofy-vs-regular, name the trick under both readings. This
+    works only because the mirror is a bijection over the whole dictionary, so
+    this asserts that on every expressible name rather than trusting the claim.
+    """
+    taxonomy = Taxonomy.load("data/tricks.json", "data/flatground_allowlist.csv")
+    closure = taxonomy.mirror_closure()
+    assert closure["unmirrored"] == [], "mirror is not total; the both-stances claim fails"
+
+    for name in taxonomy.dictionary.expressible_names():
+        result = trick_for_both_stances(name, taxonomy)
+        assert not result["unresolved"], name
+        assert result["regular"] == name
+        assert result["goofy"] in taxonomy.allowlist.canonical_names()
+
+    # The pair is genuinely two different tricks, not one name echoed back.
+    kickflip = trick_for_both_stances("kickflip", taxonomy)
+    assert kickflip["regular"] == "kickflip"
+    assert kickflip["goofy"] == "heelflip", kickflip
+    assert kickflip["stance_dependent"]
+
+    # And it round-trips: naming the goofy reading as regular gives the original.
+    assert trick_for_both_stances(kickflip["goofy"], taxonomy)["goofy"] == "kickflip"
+
+    # The mirror is an involution across the whole dictionary, so this is not a
+    # happy accident on one example.
+    for name in taxonomy.dictionary.expressible_names():
+        result = trick_for_both_stances(name, taxonomy)
+        assert trick_for_both_stances(result["goofy"], taxonomy)["goofy"] == name
 
 
 def test_confusion_matrix_folds_low_support_classes_and_stays_readable():
