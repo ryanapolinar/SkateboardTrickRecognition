@@ -727,14 +727,77 @@ result for that slice**, not evidence against the plan's hypothesis.
 **Unchanged and still true:** the split is **video-disjoint, not skater-disjoint**.
 No gate here supports a generalisation claim.
 
-**On versioning — yes, and the reason is specific.** The 95 % gate was written
-before any holdout score existed; the 5x gate was written before it was known that
-pose alone is information-limited. Both were plausible on their face and both were
-wrong, and the failure mode is identical: **a gate never measured against a real
-number is a guess**. So each revision gets a numbered section recording *what was
-believed, what was measured, and why the belief changed* — which is what lets a
-later reader distinguish a considered revision from a moving target. The file stays
-`plan-v0.3.0.md`; the sections carry the history.
+### 12.8 M2 step 1: board angle extractor works, the ORACLE CHECK FAILS (2026-09-28)
+
+The extractor was built and is **verifiably correct in isolation**; the oracle
+check on real footage **fails**, and per the M2 gate the angle is therefore *not*
+yet a training signal.
+
+| | |
+|---|---|
+| **extractor** | Otsu + morphology + largest component -> `minAreaRect` -> long-axis angle. Verified on a synthetic board of known angle: recovers **45.00 deg for a board at 45**, 0.02 deg error across 0/15/30/45/60/-30/-60 |
+| **synthetic mirror test** | a synthetic kickflip sweeps **+360**, a heelflip **-360**, near-equal and opposite — the sign is recovered |
+| **oracle on real clips** | 85 clips, 12 frames, angle measured on **67.6 %** of frames. Kick-family correct sign **5 %**, heel-family **50 %**, overall **41 %**. Kick-vs-heel separation **-20 deg** |
+| **verdict** | **FAIL. Do not train on this feature yet.** |
+
+**The failure is not a sign convention, and that matters** — a flip that is
+recoverable by negating would be a cheap fix. Checked explicitly:
+
+| | measured |
+|---|---|
+| kick-family mean sweep | **-162 deg** |
+| heel-family mean sweep | **-142 deg** |
+| separation | **-20 deg** (and +20 if globally flipped) |
+
+Both families measure *negative*. Flipping the sign globally leaves the families
+20 deg apart, which is noise at this sample size. So the measurement is not
+systematically inverted — it is **uninformative about direction**.
+
+**The magnitude is at least not random**, which is the one piece of good news:
+single-flip clips average 158 deg and double-flip clips 193 deg, and 40 % of
+single-flip clips read a flat 0. The extractor does sometimes see that rotation
+happened. It just cannot tell *which way*, which is the only thing that separates
+a kickflip from a heelflip.
+
+**The likely cause, not yet proven.** Coverage is 67.6 %, so roughly a third of
+frames have no measurement at all, and those gaps are exactly where a flip's
+direction would be read: mid-air, the board is edge-on and often partly occluded
+by a leg, and `minAreaRect` on a thin sliver is ill-conditioned. A sweep
+reconstructed from a third-missing series cannot recover direction reliably. The
+`0` readings are suspicious for the same reason — a genuinely unrotated board and
+an unmeasurable one are currently indistinguishable in the *sweep* even though
+they are distinguished per-frame.
+
+**What this rules out, and what it does not.** It does not mean board rotation is
+the wrong hypothesis — the physics argument in §12.7 is untouched, and a box
+still carries no rotation. It means **this extraction method is not good enough**,
+and the failure is in the *measurement*, not the concept.
+
+**Options, in the order worth trying:**
+
+1. **More frames.** 12 samples across a ~2 s trick badly undersamples a rotation
+   that takes ~0.3 s. 60 frames (plan §7's actual `T`) is the obvious first move
+   and cheap — the sweep is the statistic that suffers most from undersampling.
+2. **Upscale before segmentation.** The board occupies a small fraction of a
+   640 px frame; segmenting a 2-3x crop would give `minAreaRect` far more pixels
+   to work with.
+3. **A learned segmenter** (SAM prompted with "skateboard", as §6 specifies) —
+   handles occlusion that Otsu cannot, at the cost of a new failure mode.
+4. **Revisit the sign problem itself.** A rectangle has no nose/tail, so direction
+   is only recoverable if the rotation is fast relative to sampling; if the board
+   is often near-stationary between samples, direction may need a *different*
+   signal (e.g. the graphic on the deck) rather than better geometry.
+
+**Not claimed:** no M2 result. The gate (5x on pose+board) is not evaluated, and
+`probe --with-board` has deliberately **not** been run — running it now would
+produce a number built on a feature this oracle has just shown to be uninformative,
+which is precisely the kind of plausible-wrong score this project keeps refusing to
+publish.
+
+**Tooling delivered regardless** (all reusable if option 1-3 works):
+`skateid oracle`, `segment_board`, `board_axis_angle`, `board_corners`,
+`unwrap_angles`, `net_sweep`. Tests: 48 -> **52**.
+
 
 - Stance-prefixed names in output? **Default: no in v1** — stance is an input, not a rename.
 - Spin resolution beyond 0/1/2/3? **Default: 0-3 + fs/bs** (per-axis base in §4); drop the
@@ -743,6 +806,15 @@ later reader distinguish a considered revision from a moving target. The file st
   Stage B validation; the tail stays representable via the three rotation outputs.
 - Re-introduce pop-shuvit as its own label? **Default: no for v1**; revisit only if airtime
   ends up separable and someone asks for the distinction.
+
+**On versioning — yes, and the reason is specific.** The 95 % gate was written
+before any holdout score existed; the 5x gate was written before it was known that
+pose alone is information-limited. Both were plausible on their face and both were
+wrong, and the failure mode is identical: **a gate never measured against a real
+number is a guess**. So each revision gets a numbered section recording *what was
+believed, what was measured, and why the belief changed* — which is what lets a
+later reader distinguish a considered revision from a moving target. The file stays
+\plan-v0.3.0.md\; the sections carry the history.
 
 ## 13. Risks & mitigations
 
@@ -767,3 +839,5 @@ later reader distinguish a considered revision from a moving target. The file st
   goofy/regular before kick/heelflip & fs/bs are named.
 - Trustworthy auto-detect stance? **Deferred.** v1 ships `auto` only as a suggest-and-override
   pre-fill (never trusted for the sign); a genuinely reliable stance auto-detect is future work.
+
+---

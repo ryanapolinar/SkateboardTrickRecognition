@@ -20,10 +20,16 @@ from skateid.features import (
     KEYPOINT_COUNT,
     KEYPOINT_NAMES,
     body_features,
+    board_angle,
+    board_axis_angle,
+    board_corners,
     board_features,
     cache_key,
     load_features,
+    net_sweep,
     save_features,
+    segment_board,
+    unwrap_angles,
 )
 from skateid.stance import (
     CONFIDENCE_FLOOR,
@@ -596,6 +602,110 @@ def test_every_trick_can_be_named_for_both_stances():
     for name in taxonomy.dictionary.expressible_names():
         result = trick_for_both_stances(name, taxonomy)
         assert trick_for_both_stances(result["goofy"], taxonomy)["goofy"] == name
+
+
+def _synthetic_board_image(angles_degrees: List[float], size: int = 120) -> List[np.ndarray]:
+    """Render a white board on black, rotated to each given angle.
+
+    A synthetic board with a *known* angle is the only way to test the angle
+    pipeline without trusting a real clip -- if the extractor cannot recover 45
+    deg from a clean synthetic board, no amount of real footage will help, and
+    the bug is in the code rather than the segmentation.
+    """
+    import cv2
+
+    frames = []
+    for angle in angles_degrees:
+        frame = np.zeros((size, size, 3), dtype=np.uint8)
+        layer = frame.copy()
+        cv2.rectangle(layer, (10, 52), (110, 68), (255, 255, 255), -1)
+        # -angle, not angle: image rows increase downward, so a positive visual
+        # rotation is a negative angle in atan2(dy, dx) terms. The extractor
+        # measures 45.00 deg for a board at -45, which is a convention, not an
+        # error -- but the fixture has to state which one it is using.
+        matrix = cv2.getRotationMatrix2D((size / 2, size / 2), -angle, 1.0)
+        frame = cv2.warpAffine(layer, matrix, (size, size))
+        frames.append(frame)
+    return frames
+
+
+def test_board_angle_recovers_a_known_rotation():
+    """The whole point of minAreaRect: a rotating board keeps its own angle.
+
+    An axis-aligned bounding box would return 0 deg for every one of these. The
+    rotated rectangle is what recovers the signal, so this asserts the recovery is
+    accurate on inputs whose true angle is known exactly.
+    """
+    for true_angle in (0, 15, 30, 45, 60, -30, -60):
+        frames = _synthetic_board_image([true_angle])
+        box = np.array([0.0, 0.0, 120.0, 120.0])
+        mask = segment_board(frames[0], box)
+        assert mask is not None, f"no mask at {true_angle} deg"
+        assert board_corners(mask) is not None, f"no corners at {true_angle} deg"
+        measured = board_axis_angle(mask)
+        # Angles are mod 180 because a rectangle has no facing; compare on the
+        # shortest way round so 0 and 180 are the same orientation.
+        delta = abs((measured - true_angle + 90.0) % 180.0 - 90.0)
+        assert delta < 6.0, f"true {true_angle}, measured {measured:.1f}"
+
+
+def test_signed_sweep_separates_a_flip_from_a_heelflip():
+    """The mirror pair is separated by the *sign* of the sweep, not its size.
+
+    This is the test the whole board stream exists to pass. A kickflip and a
+    heelflip trace the same magnitude of rotation in opposite directions, so any
+    feature that ignored direction -- a mean angle, an absolute sweep, a
+    bounding-box aspect ratio -- would score them identically.
+    """
+    kick = _synthetic_board_image([0, 45, 90, 135, 179, -135, -90, -45])
+    heel = _synthetic_board_image([0, -45, -90, -135, -179, 135, 90, 45])
+
+    def measure(frames):
+        angles = []
+        for frame in frames:
+            mask = segment_board(frame, np.array([0.0, 0.0, 120.0, 120.0]))
+            angles.append(board_axis_angle(mask))
+        return net_sweep(angles)
+
+    forward, backward = measure(kick), measure(heel)
+    assert forward > 0, f"kickflip should sweep positive, got {forward}"
+    assert backward < 0, f"heelflip should sweep negative, got {backward}"
+    assert abs(forward + backward) < 60, "mirror sweeps should be near-equal and opposite"
+    # The synthetic sequence sweeps a full 360, and the magnitude must be right as
+    # well as the sign -- a feature that only caught direction would still fail
+    # here. This is the "one kickflip" the manifest's rotation field encodes.
+    assert abs(abs(forward) - 360) < 60, f"one full rotation expected, got {forward}"
+
+
+def test_angles_are_unwrapped_across_the_wrap_boundary():
+    """A per-frame angle in (-90, 90] cannot be averaged or differenced naively.
+
+    The board crosses the wrap point mid-flip, so the raw series looks like noise
+    even when the motion is perfectly smooth. Unwrapping is what turns it back
+    into a continuous sweep -- without it, the sign of the rotation is destroyed
+    by arithmetic rather than by anything in the video.
+    """
+    smooth = [0, 30, 60, 89, 61, 30, 0, -30, -60, -89, -61, -30, 0]
+    unwrapped = unwrap_angles(smooth)
+    # A smooth rotation must produce monotonically rising then falling values, not
+    # jumps of 180 at the boundary.
+    assert max(abs(b - a) for a, b in zip(unwrapped, unwrapped[1:])) < 90, unwrapped
+    assert net_sweep(smooth) == 0.0, "returns to the start, so no net rotation"
+    assert unwrap_angles([]) == []
+
+
+def test_segmentation_refuses_rather_than_guesses():
+    """A failed measurement must be None, never a confident wrong angle.
+
+    A blank box has no board in it. Returning a 0-degree angle for it would be
+    indistinguishable from an ollie -- a board that genuinely did not rotate --
+    and would poison the sweep for the whole clip.
+    """
+    blank = np.zeros((120, 120, 3), dtype=np.uint8)
+    assert segment_board(blank, np.array([0.0, 0.0, 120.0, 120.0])) is None
+
+    # A box too small to segment is also a refusal, not a division by zero.
+    assert segment_board(blank, np.array([0.0, 0.0, 3.0, 3.0])) is None
 
 
 def test_confusion_matrix_folds_low_support_classes_and_stays_readable():

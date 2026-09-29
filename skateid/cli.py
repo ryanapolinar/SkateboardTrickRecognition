@@ -7,6 +7,7 @@ import json
 import time
 from pathlib import Path
 import sys
+import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report
@@ -15,6 +16,7 @@ from sklearn.preprocessing import StandardScaler
 from skateid.eval import evaluate_predictions, format_confusion_matrix
 from skateid.stance import trick_for_both_stances
 from skateid.taxonomy import Taxonomy
+from skateid.video import sample_frames
 
 #: Value in the `split_holdout` column meaning "held out". The column holds
 #: train/test; the *published* column is a different partition of the same clips,
@@ -276,6 +278,90 @@ def baselines_cmd(args: argparse.Namespace) -> int:
         with open(out_path, "w") as handle:
             json.dump({"dataset": args.dataset, "split": args.split, "results": trimmed}, handle, indent=2)
         print(f"\nWrote {out_path}")
+    return 0
+
+
+def oracle_cmd(args) -> int:
+    """M2's oracle check: does the measured board angle track the real rotation?
+
+    Run *before* training anything on this feature. It answers one question with
+    real footage rather than a model score: for clips whose manifest label already
+    says how many flips happened, does the measured signed sweep agree?
+
+    The bar is deliberately low and deliberately explicit. A sweep that merely
+    *varies* across clips proves nothing -- noise varies too. What matters is
+    whether the sign separates kick-family from heel-family, because that is the
+    axis pose cannot see and the entire reason this stream exists.
+    """
+    from . import features
+
+    frame = pd.read_csv(args.manifest, dtype={"clip_id": str})
+    frame = frame[frame["dataset"] == "skateai"]
+    if args.limit:
+        frame = frame.head(args.limit)
+    elif args.per_class:
+        # A few clips per class, so the table is not 112 kickflips.
+        frame = frame.groupby("label", group_keys=False).head(args.per_class)
+
+    import torch
+    from ultralytics import YOLO
+
+    device = 0 if torch.cuda.is_available() else "cpu"
+    board_model = YOLO("yolo11n.pt").to(device)
+
+    rows = []
+    for _, record in frame.iterrows():
+        try:
+            batch = sample_frames(record["file_path"], count=args.frames, size=(640, 640))
+        except (OSError, ValueError):
+            continue
+        angles = []
+        for image in batch:
+            box = features.detect_board(board_model, image, device=device)
+            angles.append(features._measure_angle(image, box))
+        usable = [a for a in angles if a is not None]
+        sweep = features.net_sweep(usable) if len(usable) >= 2 else 0.0
+        rows.append({
+            "clip_id": record["clip_id"],
+            "label": record["label"],
+            "flip": int(record["flip_number"]),
+            "flip_type": str(record["flip_type"]),
+            "board_spin": int(record["board_rotation_number"]),
+            "expected_sign": -1 if "heel" in str(record["flip_type"]) else (1 if "kick" in str(record["flip_type"]) else 0),
+            "measured_sweep": sweep,
+            "angle_coverage": len(usable) / max(args.frames, 1),
+        })
+
+    report = pd.DataFrame(rows)
+    report.to_csv(args.out, index=False)
+    if report.empty:
+        print("no clips could be measured", file=sys.stderr)
+        return 2
+
+    report["sign_ok"] = (
+        (report["expected_sign"] == 0)
+        | (np.sign(report["measured_sweep"]) == report["expected_sign"])
+    )
+    kick = report[report["expected_sign"] == 1]
+    heel = report[report["expected_sign"] == -1]
+
+    print(f"measured {len(report)} clips, {args.frames} frames each\n")
+    print(f"{'label':<22}{'exp':>4}{'sweep':>9}{'cover':>7}  sign")
+    for _, r in report.head(args.show).iterrows():
+        mark = "ok" if r["sign_ok"] else ("--" if r["expected_sign"] == 0 else "MISS")
+        print(f"{r['label']:<22}{r['expected_sign']:>4}{r['measured_sweep']:>9.0f}"
+              f"{r['angle_coverage']:>7.2f}  {mark}")
+
+    print(f"\nangle measured on {report['angle_coverage'].mean():.1%} of frames on average")
+    print(f"kick-family clips: {len(kick)}, mean sweep {kick['measured_sweep'].mean():+.0f} deg, "
+          f"correct sign {kick['sign_ok'].mean():.0%}")
+    print(f"heel-family clips: {len(heel)}, mean sweep {heel['measured_sweep'].mean():+.0f} deg, "
+          f"correct sign {heel['sign_ok'].mean():.0%}")
+    if len(kick) and len(heel):
+        print(f"\nkick - heel separation: "
+              f"{kick['measured_sweep'].mean() - heel['measured_sweep'].mean():+.0f} deg "
+              f"({report['sign_ok'].mean():.0%} of all clips get the right sign)")
+    print(f"\nwrote {args.out}")
     return 0
 
 
@@ -546,6 +632,16 @@ def main() -> int:
         "(other). 0 prints every class (very wide past ~10 classes).",
     )
 
+    oracle_p = subparsers.add_parser(
+        "oracle", help="Check the measured board angle against known flip labels (M2 step 1)"
+    )
+    oracle_p.add_argument("--manifest", default="data/manifest.csv", help="Path to manifest CSV")
+    oracle_p.add_argument("--frames", type=int, default=12, help="Frames sampled per clip")
+    oracle_p.add_argument("--per-class", type=int, default=3, help="Clips per label (0 = all)")
+    oracle_p.add_argument("--limit", type=int, default=0, help="Cap total clips")
+    oracle_p.add_argument("--show", type=int, default=20, help="Rows to print")
+    oracle_p.add_argument("--out", default="data/oracle_board.csv", help="Where to write the report")
+
     probe_p = subparsers.add_parser(
         "probe", help="Score cached pose features against the holdout split (M1's gate)"
     )
@@ -648,6 +744,8 @@ def main() -> int:
         return extract_cmd(args)
     elif args.command == "probe":
         return probe_cmd(args)
+    elif args.command == "oracle":
+        return oracle_cmd(args)
     return 0
 
 if __name__ == "__main__":

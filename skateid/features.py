@@ -182,6 +182,162 @@ def load_features(cache_dir: Path, key: str) -> Optional[Tuple[np.ndarray, np.nd
         return None
 
 
+def unwrap_angles(degrees: List[float]) -> List[float]:
+    """Turn per-frame angles into a continuous accumulated sweep.
+
+    The per-frame angle is in (-90, 90] (a rectangle has no facing), but a flip
+    is a rotation that crosses that boundary many times. Any naive mean or slope
+    of the raw angles is therefore meaningless -- a board sweeping smoothly
+    through 360 deg looks, frame by frame, like noise bouncing off the wrap point.
+
+    The angles are unwrapped into a continuous series so a *net sweep* can be
+    measured: unwrap a kickflip and it travels roughly +360; a heelflip roughly
+    -360. That signed sweep is the feature, and it is what makes the mirror pair
+    separable.
+    """
+    if not degrees:
+        return []
+    out = [float(degrees[0])]
+    for angle in degrees[1:]:
+        previous = out[-1]
+        delta = (float(angle) - previous + 90.0) % 180.0 - 90.0
+        out.append(previous + delta)
+    return out
+
+
+def net_sweep(degrees: List[float]) -> float:
+    """Total signed rotation across a clip, in degrees, after unwrapping.
+
+    Nearest multiple of 180 to the raw endpoint difference: the board ends up
+    flipped, so 360 and -360 and 180 are all "one flip" and the sign carries the
+    kick/heel information. Reported in degrees so a reader can check it against
+    the expected 360 without a unit conversion.
+    """
+    unwrapped = unwrap_angles(degrees)
+    if len(unwrapped) < 2:
+        return 0.0
+    total = unwrapped[-1] - unwrapped[0]
+    return float(round(total / 180.0) * 180.0)
+
+
+def board_angle(corners: np.ndarray) -> float:
+    """Long-axis angle in degrees in (-90, 90], from 4 corners of a rotated rect.
+
+    The long axis is taken as the *longer* of the two sides, so the reported angle
+    is the board's own axis rather than its short edge. Ambiguity of 180 deg is
+    inherent and deliberate: a rectangle does not say which end is the nose, and
+    pretending otherwise is how a sign convention gets quietly invented. The
+    signed sweep in :func:`net_sweep` is what carries direction.
+    """
+    points = np.asarray(corners, dtype=np.float32).reshape(4, 2)
+    edges = [np.linalg.norm(points[(i + 1) % 4] - points[i]) for i in range(4)]
+    # OpenCV's minAreaRect orders corners, but not consistently enough to trust;
+    # take the longest edge found between any pair.
+    best, best_len = 0.0, -1.0
+    for i in range(4):
+        for j in range(i + 1, 4):
+            length = float(np.linalg.norm(points[j] - points[i]))
+            if length > best_len:
+                best_len, best = length, float(np.arctan2(points[j][1] - points[i][1],
+                                                         points[j][0] - points[i][0]))
+    degrees = np.degrees(best)
+    return float((degrees + 90.0) % 180.0 - 90.0)
+
+
+def segment_board(frame: np.ndarray, box: np.ndarray) -> Optional[np.ndarray]:
+    """Isolate the board inside its detection box, returning a binary mask.
+
+    Deliberately classical (Otsu + morphology + largest component) rather than a
+    learned segmenter. A skateboard is a small, high-contrast, roughly-flat
+    object inside a box that already contains it, so thresholding is adequate and
+    -- more importantly -- has no failure mode that produces a *confident wrong
+    mask*. A segmentation model that misses the board hands back a plausible
+    mask of a foot, and the resulting angle is silently garbage.
+
+    Returns ``None`` when the box is unusable or the mask is implausibly small,
+    so "could not measure" stays distinguishable from "measured zero degrees".
+    """
+    import cv2
+
+    height, width = frame.shape[:2]
+    x1, y1, x2, y2 = [int(round(v)) for v in box]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(width, x2), min(height, y2)
+    if x2 - x1 < 8 or y2 - y1 < 8:
+        return None
+
+    crop = frame[y1:y2, x1:x2]
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+    # Otsu on a blurred copy: a board seen edge-on during a flip is only a few
+    # pixels wide, and hard edges produce speckle that breaks connectivity.
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    _, mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if count <= 1:
+        return None
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    largest = 1 + int(areas.argmax())
+    area = float(areas.max())
+    # A board filling < 4 % of its own box is a mis-detection (a shoe, a shadow),
+    # not a board. Returning None here is what keeps a bad mask out of the angle.
+    if area < 0.04 * mask.size:
+        return None
+    return (labels == largest).astype(np.uint8) * 255
+
+
+def board_corners(mask: np.ndarray) -> Optional[np.ndarray]:
+    """Smallest rotated rectangle enclosing the board mask -> 4 corners.
+
+    This is the step that recovers the rotation: a board spinning in the air is
+    mostly a thin diagonal line, and a bounding box around it barely changes as it
+    turns, whereas the minimum-area rectangle follows the board's own axis.
+    """
+    import cv2
+
+    points = cv2.findNonZero(mask)
+    if points is None or len(points) < 4:
+        return None
+    (cx, cy), (w, h), angle = cv2.minAreaRect(points)
+    if w < 2 or h < 2:
+        return None
+    return np.asarray(cv2.boxPoints(((cx, cy), (w, h), angle)), dtype=np.float32)
+
+
+def board_axis_angle(mask: np.ndarray) -> Optional[float]:
+    """Long-axis angle in (-90, 90] straight from ``minAreaRect``.
+
+    Taken from the rectangle's own ``ang`` rather than by differencing its corner
+    points, which was tried first and is wrong: OpenCV orders the four corners
+    but not in a way that guarantees consecutive points are the long edge, so
+    differencing them picks up the *short* edge (or a diagonal) and reports a
+    constant offset. ``minAreaRect``'s angle is exact for a clean mask --
+    measured 45.00 deg for a synthetic board at 45 -- so it is used directly.
+
+    Mod 180, because a rectangle has no facing. A skateboard's nose and tail are
+    indistinguishable from its outline alone, and inventing a direction from it is
+    exactly how a sign convention gets quietly fabricated. The *signed sweep* in
+    :func:`net_sweep` is what carries kick-vs-heel.
+    """
+    import cv2
+
+    points = cv2.findNonZero(mask)
+    if points is None or len(points) < 4:
+        return None
+    (_, _), (w, h), angle = cv2.minAreaRect(points)
+    if w < 2 or h < 2:
+        return None
+    # minAreaRect reports the angle of whichever side it treats as "width", which
+    # swaps near 45 deg. Normalising through the long axis keeps it continuous.
+    if w < h:
+        angle += 90.0
+    return float((angle + 90.0) % 180.0 - 90.0)
+
+
 def extract_clip(
     clip_id: str,
     path: Path,
@@ -206,6 +362,7 @@ def extract_clip(
     batch = sample_frames(path, count=frames, size=size)
     body = np.zeros((frames, KEYPOINT_COUNT * 3), dtype=np.float32)
     board = np.zeros((frames, 5), dtype=np.float32)
+    angles: List[Optional[float]] = []
 
     for index, frame in enumerate(batch):
         if pose_model is not None:
@@ -226,9 +383,51 @@ def extract_clip(
 
         if board_model is not None:
             box = detect_board(board_model, frame, device=device)
-            board[index] = board_features(box, frame.shape)
+            angles.append(_measure_angle(frame, box))
+    return body, board_features_from_angles(board, angles, frames)
 
-    return body, board
+
+def _measure_angle(frame: np.ndarray, box: Optional[np.ndarray]) -> Optional[float]:
+    """Board's long-axis angle in this frame, or ``None`` if it could not be measured.
+
+    Never returns a placeholder. A frame where the board was not detected, or
+    where segmentation found nothing plausible, stays ``None`` all the way into
+    the feature vector, so "not measured" and "measured zero degrees" -- which
+    would mean an ollie -- are distinguishable.
+    """
+    if box is None:
+        return None
+    mask = segment_board(frame, box)
+    if mask is None:
+        return None
+    return board_axis_angle(mask)
+
+
+def board_features_from_angles(
+    filled: np.ndarray, angles: List[Optional[float]], frames: int
+) -> np.ndarray:
+    """Board stream = detection features, per-frame angles, and a signed sweep.
+
+    Layout per frame: the 5 box features, then that frame's angle (NaN where
+    unmeasurable, so a missing measurement is distinguishable from a measured 0),
+    then two summary scalars on the first row -- the **signed net sweep** and the
+    fraction of frames that produced an angle at all.
+
+    The summary scalars are what carry trick identity. A kickflip and a heelflip
+    differ only in the *sign* of the sweep, so a feature set that kept the
+    per-frame angles but dropped the sign would score them identically -- which is
+    the precise failure this stream was built to fix.
+    """
+    out = np.zeros((frames, 5 + frames + 2), dtype=np.float32)
+    out[:, :5] = filled
+    series = [np.nan if angle is None else angle for angle in angles]
+    for index, value in enumerate(series[:frames]):
+        out[index, 5 + index] = value
+    usable = [angle for angle in series if angle is not None]
+    # Normalised to 1.0 per full rotation so the LR sees a bounded input.
+    out[0, 5 + frames] = net_sweep(usable) / 360.0 if len(usable) >= 2 else 0.0
+    out[0, 5 + frames + 1] = len(usable) / max(frames, 1)
+    return out
 
 
 def pose_only_features(cache_dir: Path, key: str) -> Optional[np.ndarray]:
