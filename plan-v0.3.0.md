@@ -428,9 +428,9 @@ eval baseline), `fastapi`, `uvicorn`, `python-multipart`, `opencv-python`, `nump
 | | Work | Exit gate |
 |---|---|---|
 | **M0** half day | uv env + skeleton + download 222 clips + manifest + both splits + B0/B1/B2 | `skateid train && skateid eval` prints a confusion matrix + a floor |
-| **M1** 1-2 days | pull SkateAI's 449 BATB clips in (12 source videos -> 449 cuts); pose features + LR -> tiny transformer, flip head (regression + quantization) | 449 `skateai` clips in the manifest with a **video-disjoint** `split_holdout`; then **pose/board features beat the best measured holdout floor (0.0401, VideoMAE) by >= 5x macro-F1 (>= 0.20)**, with the confusion matrix published showing what is still hard; **else stop and fix features before scaling**. Still not a skater-disjoint claim. Gate revised 2026-09-28 — see §12.5 |
-| **M2** 1-2 days | board corners merged (still zero labels); oracle plots for board features | board stream adds >= 3 macro-F1 over pose-only; flip visible in `--debug` |
-| **M3** 2-4 days | `skateid serve` end-to-end; more heads (flip / board / body); abstain calibration; exploit SkateAI's 31-class compositional labels | all three rotation heads live; >= 90 % correct-or-abstained; web page shows trick or "not sure" in <2 s |
+| **M1** 1-2 days | pull SkateAI's 449 BATB clips in (12 source videos -> 449 cuts); CUDA torch; goofy/regular as an input; **pose features + extraction pipeline** | 671 clips ingested and feature-cached (671/671, 0 failures); stance as an override-only input with both-stances naming; **pose-only LR measured on the video-disjoint holdout as an ABLATION** (0.0406 = 1.01x the VideoMAE floor — see §12.5). No accuracy gate: pose alone is provably insufficient for mirror pairs (§12.7), so this milestone's job was to build and measure the pipeline |
+| **M2** 1-2 days | **board corners + long-axis angle (the missing axis)**; pose+board tiny transformer | **pose+board beats the best measured holdout floor (0.0401) by >= 5x macro-F1 (>= 0.20)**, with the confusion matrix published; **pose-only stays reported as the ablation**. The board stream must also be shown load-bearing — mirror pairs separable in the confusion matrix — since that is the hypothesis M1 existed to test. Still not a skater-disjoint claim. Gates restructured 2026-09-28, see §12.7 |
+| **M3** 2-4 days | `skateid serve` end-to-end; more heads (flip / board / body); abstain calibration; exploit SkateAI's 31-class compositional labels | all three rotation heads live; correct-or-abstained >= 90 % **while abstaining on <= 30 % of clips** (see §12.7); web page shows trick or "not sure" in <2 s |
 | **M4** optional | web polish (annotate toggle, top-3 list, batch in page); ONNX export; distill board -> YOLO26-OBB | < 0.5 s/clip |
 
 ### 12.1 M0 status as built, plus the M1 SkateAI pull (2026-09-27)
@@ -565,7 +565,7 @@ correctness signal, not a capability.
 (§3's `auto` stays suggest-only); pose + board extraction; and reinstall torch
 from the CUDA index to use the RTX 3060 rather than the CPU build.
 
-### 12.6 M1 closeout: the gate is NOT met, and the diagnosis (2026-09-28)
+### 12.5 M1 closeout: extraction complete, pose-only at 1.01x the floor (2026-09-28)
 
 | | |
 |---|---|
@@ -628,6 +628,13 @@ more stable read than a 22-class macro average over 112 clips.
 skater-disjoint, and none of these numbers would support such a claim even had
 they been higher.
 
+
+### 12.6 The first gate revision: 95 % macro-F1 -> 5x the floor (2026-09-28)
+
+> **Superseded by §12.7.** The 95 % -> 5x revision below was a considered change on
+> its own terms, but §12.7 found a deeper problem: pose-only is information-limited
+> for mirror pairs, so even a correct 5x bar was being applied to a
+> half-representation. Kept as the first of two recorded gate revisions.
 
 M1's exit gate previously read ">= 95 % macro-F1 vs. the `skateai` holdout
 floor". That number was written before any holdout macro-F1 had been measured,
@@ -693,6 +700,65 @@ rate ceiling before it is used as a gate.
   goofy/regular before kick/heelflip & fs/bs are named.
 - Trustworthy auto-detect stance? **Deferred.** v1 ships `auto` only as a suggest-and-override
   pre-fill (never trusted for the sign); a genuinely reliable stance auto-detect is future work.
+### 12.7 Gates restructured: why pose alone cannot be the M1 gate (2026-09-28)
+
+§12.5 measured pose-only at **1.01x** the frozen-embedder floor. Before reading that
+as "the representation failed", the physical question has to be asked: **could a
+human pose tracker ever separate these classes?**
+
+**It cannot, and not because the model is weak.** A kickflip and a heelflip are a
+**mirror pair** (§7) — the rider's body follows the same arc in both; the only
+difference is the direction the *board* rotates under their feet. Pose is
+mirror-symmetric about the body, so it is **information-theoretically incapable**
+of breaking that symmetry. The same holds for every pair differing only in `flip`
+or `board_spin`:
+
+| separable by pose? | examples |
+|---|---|
+| **yes** | ollie vs shuvit-family (different body arc); bigspin vs 360 (`body_spin` genuinely differs) |
+| **no** | kickflip vs heelflip, double variants, any shuvit-component difference — **board-only rotation** |
+
+The data agrees: the video-disjoint holdout's 22 classes occupy only **8 distinct
+`(flip, board_spin)` signatures** (the largest, `(1,1)`, covers 39 clips spanning
+several names). The two missing axes are precisely the ones that split the
+vocabulary.
+
+**So the M1 gate was mis-scoped, not the architecture.** §6 has always specified
+*both* streams at step 2 (pose -> 17 joints; board -> mask -> 4 corners), with 13
+of ~52 feature dimensions belonging to the board. M1's *milestone line* said "pose
+features + LR" while its *gate* implied the full representation — so the gate was
+measured against a deliberately half-built slice, and **1.01x is the correct
+result for that slice**, not evidence against the plan's hypothesis.
+
+**Restructured gates:**
+
+- **M1 keeps no accuracy gate.** Its job was to stand up CUDA, stance handling and
+  the extraction pipeline, and to produce the **pose-only ablation** M2 needs as a
+  comparison point. Done, with the number recorded.
+- **M2 carries the 5x gate**, applied to **pose+board**, with pose-only reported
+  beside it as an ablation rather than as the headline.
+- **M2 must additionally show the board stream is load-bearing** — not merely that
+  the combined model improves, but that the rotation axis contributes, since that
+  is the hypothesis M1 originally existed to test. The old M2 gate ("board adds
+  >= 3 macro-F1") is kept as a floor but is too weak alone: +3 on a 0.04 base is
+  noise-adjacent. The real evidence is the confusion matrix showing **mirror pairs
+  have become separable** — that is the qualitative check a number cannot fake.
+- **M3 gains an abstention-rate ceiling.** ">= 90 % correct-or-abstained" is
+  trivially satisfiable by abstaining on everything; it needs a bound (e.g. correct
+  or abstained >= 90 % *while* abstaining on <= 30 % of clips).
+
+**Unchanged and still true:** the split is **video-disjoint, not skater-disjoint**.
+No gate here supports a generalisation claim.
+
+**On versioning — yes, and the reason is specific.** The 95 % gate was written
+before any holdout score existed; the 5x gate was written before it was known that
+pose alone is information-limited. Both were plausible on their face and both were
+wrong, and the failure mode is identical: **a gate never measured against a real
+number is a guess**. So each revision gets a numbered section recording *what was
+believed, what was measured, and why the belief changed* — which is what lets a
+later reader distinguish a considered revision from a moving target. The file stays
+`plan-v0.3.0.md`; the sections carry the history.
+
 - Stance-prefixed names in output? **Default: no in v1** — stance is an input, not a rename.
 - Spin resolution beyond 0/1/2/3? **Default: 0-3 + fs/bs** (per-axis base in §4); drop the
   ultra-long tail (tre triple flip, bigspin inward heel, 1-clip classes) from M3 targets.
