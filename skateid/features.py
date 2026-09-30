@@ -205,6 +205,76 @@ def unwrap_angles(degrees: List[float]) -> List[float]:
     return out
 
 
+def active_window(
+    angles: List[Optional[float]], min_span: int = 4, max_span: int = 20
+) -> Optional[Tuple[int, int]]:
+    """The (start, end) index range where the board is actually rotating.
+
+    A trick clip is ~2 s, but the flip itself is ~0.3 s; the rest is approach,
+    pop and roll-away. Measuring a fixed grid over the whole clip therefore
+    spends most of its samples on frames where nothing is rotating, and a double
+    flip can alias into a single one.
+
+    Selects the **highest-variation contiguous window** of the measured series, so
+    the sample budget goes where the signal is. The window is chosen on *total
+    variation* rather than "first to last detected", because the board is usually
+    still visible before and after the rotation and those frames would dilute the
+    quantity being measured.
+
+    ``max_span`` bounds the window so a long slow drift across the whole clip
+    cannot be selected as "the rotation" -- without it, a series whose variation
+    grows monotonically makes the full span the answer every time, which is
+    precisely the un-windowed behaviour this is meant to replace.
+
+    Returns ``None`` when there is no measurable rotation, which is a real and
+    common case (an ollie) and must not be reported as a zero-degree rotation.
+    """
+    if not angles:
+        return None
+    # Compact to the measured frames, keeping original indices for provenance.
+    # Dropping unmeasurable frames here is what keeps None out of every
+    # downstream slice.
+    measured = [(index, value) for index, value in enumerate(angles) if value is not None]
+    if len(measured) < min_span:
+        return None
+
+    unwrapped = unwrap_angles([value for _, value in measured])
+    best: Optional[Tuple[int, int]] = None
+    best_variation = 0.0
+    for start in range(0, len(unwrapped) - min_span + 1):
+        for end in range(start + min_span, min(len(unwrapped), start + max_span) + 1):
+            variation = sum(
+                abs(b - a) for a, b in zip(unwrapped[start:end], unwrapped[start + 1 : end + 1])
+            )
+            if variation > best_variation:
+                best_variation, best = variation, (measured[start][0], measured[end - 1][0])
+    if best is None or best_variation < 1.0:
+        return None
+    return best
+
+
+def windowed_sweep(angles: List[Optional[float]]) -> Tuple[float, int, int]:
+    """(signed sweep in degrees, window start, window end) over the active window.
+
+    Falls back to the whole series when no window stands out, so a clip with a
+    gentle rotation still produces a measurement rather than silently nothing.
+    The unmeasurable frames are removed before slicing, so no ``None`` can reach
+    :func:`net_sweep`.
+    """
+    window = active_window(angles)
+    usable = [value for value in angles if value is not None]
+    if window is None:
+        if len(usable) < 2:
+            return 0.0, -1, -1
+        return net_sweep(usable), 0, len(angles) - 1
+
+    start, end = window
+    measured = [value for value in angles[start : end + 1] if value is not None]
+    if len(measured) < 2:
+        return net_sweep(usable), start, end
+    return net_sweep(measured), start, end
+
+
 def net_sweep(degrees: List[float]) -> float:
     """Total rotation travelled across a clip, in degrees, signed by direction.
 

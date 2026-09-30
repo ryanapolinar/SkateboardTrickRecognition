@@ -359,7 +359,14 @@ def oracle_cmd(args) -> int:
             else:
                 angles.append(features._measure_angle(image, features.detect_board(board_model, image, device=device)))
         usable = [a for a in angles if a is not None]
-        sweep = features.net_sweep(usable) if len(usable) >= 2 else 0.0
+        if args.window:
+            # Measure only the rotation window, not the whole clip. The flip is
+            # ~0.3 s of a ~2 s clip, so a fixed grid spends most of its samples
+            # on frames where nothing rotates.
+            sweep, start, end = features.windowed_sweep(angles)
+        else:
+            sweep = features.net_sweep(usable) if len(usable) >= 2 else 0.0
+            start, end = 0, len(angles) - 1
         rows.append({
             "clip_id": record["clip_id"],
             "label": record["label"],
@@ -368,6 +375,7 @@ def oracle_cmd(args) -> int:
             "board_spin": int(record["board_rotation_number"]),
             "expected_sign": -1 if "heel" in str(record["flip_type"]) else (1 if "kick" in str(record["flip_type"]) else 0),
             "measured_sweep": sweep,
+            "window": f"{start}-{end}" if start >= 0 else "",
             "angle_coverage": len(usable) / max(args.frames, 1),
         })
 
@@ -683,6 +691,10 @@ def main() -> int:
     oracle_p.add_argument(
         "--segmenter", default="", help="Use a YOLO *segmentation* model for the board mask "
         "(e.g. yolo11n-seg.pt) instead of Otsu thresholding",
+    )
+    oracle_p.add_argument(
+        "--window", action="store_true",
+        help="Measure only the rotation window (highest-variation span) instead of the whole clip",
     )
 
     probe_p = subparsers.add_parser(

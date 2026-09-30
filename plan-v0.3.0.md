@@ -990,8 +990,80 @@ rotation signal?" — now has a nuanced answer:
    make it impossible to tell which helped.
 3. **SAM** — still deferred; the segmentation is no longer the bottleneck.
 
-**Still not claimed:** no M2 result, and `probe --with-board` remains unrun. The
-gate is not evaluated, and would not yet be meaningful.
+### 12.12 M2 step 1e: dense windowing makes it WORSE — and why (2026-09-28)
+
+`active_window()` / `windowed_sweep()` are implemented, tested and exposed as
+`skateid oracle --window`. The idea was sound: spend the sample budget on the flip
+rather than on the approach and roll-away. **Measured, it regresses.**
+
+| | whole clip | `--window` |
+|---|---|---|
+| kick-family mean | **-86 deg** | -36 deg |
+| heel-family mean | **+22 deg** | -38 deg |
+| **kick − heel separation** | **-108 deg** | **+2 deg** |
+| overall correct sign | 52 % (55 % flipped) | 59 % (58 % flipped) |
+
+**The separation collapses from -108 deg to +2 deg** — the window destroys
+essentially all of the signal, leaving kick and heel indistinguishable.
+
+**Why, and it is not subtle:** the selected window has a **median width of 35 of
+60 frames**. It is not isolating the ~0.3 s flip; it is taking more than half the
+clip. `active_window` maximises total variation subject to `max_span=20`
+*measured* frames, and because ~38 % of frames are unmeasurable, 20 measured
+frames can span 35+ original frames of mostly-static board. The window is doing
+the opposite of its job.
+
+Worse, "highest total variation" is the wrong objective here: a slow drift across
+the clip accumulates more total variation than a real 0.3 s flip, so the search
+prefers the drift. The flip is a *fast* event, and the window should be selected
+on **peak angular rate** (a short window, max |dθ/dt|), not on total variation.
+
+**One number is genuinely better:** overall sign accuracy rose to **59 %** (58 %
+flipped). But that is not a win — with separation at +2 deg the two families have
+the same *mean*, and 59 % is what you get from a near-zero predictor that
+occasionally guesses right. It is a coincidence, not progress.
+
+**Honest summary of M2's position after five attempts:**
+
+| attempt | kick−heel separation |
+|---|---|
+| Otsu, 12 frames (12.8) | -20 deg |
+| 60 frames (12.9) | -39 deg |
+| YOLO-seg (12.9) | +10 deg |
+| + sweep bug fixed (12.11) | **-108 deg** ← best |
+| + windowing (12.12) | +2 deg |
+
+**The sweep fix is the only change that has ever moved this number materially**,
+and everything since has either been neutral or harmful. That is worth stating
+plainly: four of the five "improvements" tried in M2 produced no usable signal,
+and the one that did was a bug fix, not a technique.
+
+**Why the window idea may still be right, done properly.** The premise is sound
+and untested: the flip is 0.3 s of a 2 s clip, so a 60-frame grid gives the flip
+~9 samples. A correct implementation would (a) select on **peak angular rate**
+rather than total variation, (b) bound the window in *original* frames, and
+(c) re-sample that window densely from the video rather than from the already-60
+samples — which is the part not yet tried, and the only version that actually
+increases temporal resolution. **As implemented it only *selects* from existing
+samples, which cannot add information, and the -108 deg whole-clip number shows
+that discarding samples is what hurt.**
+
+**Recommended next, honestly assessed:**
+1. **Revert to the whole-clip statistic** (the -108 deg configuration) as the
+   working baseline. Keep `--window` off by default.
+2. **Find the sign convention.** It is a definite bug — kick reads negative, heel
+   positive — and it is cheap. Fixing it before anything else makes every later
+   measurement interpretable.
+3. Only then revisit denser sampling, and if so as a **re-decode of the chosen
+   window**, not a re-selection of existing frames.
+
+**Still not claimed:** no M2 result. `probe --with-board` remains unrun — and on
+this evidence that is the correct call, since the feature's behaviour changes sign
+and magnitude depending on which frames are included.
+
+**Note on cost:** the O(n²) window search over 60-frame series made the oracle run
+~20 min for 85 clips. If windowing is revisited it needs a linear-time scan.
+
 
 
 

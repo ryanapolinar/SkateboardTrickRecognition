@@ -19,6 +19,7 @@ from skateid.features import (
     EXTRACTOR_VERSION,
     KEYPOINT_COUNT,
     KEYPOINT_NAMES,
+    active_window,
     body_features,
     board_angle,
     board_axis_angle,
@@ -30,6 +31,7 @@ from skateid.features import (
     save_features,
     segment_board,
     unwrap_angles,
+    windowed_sweep,
 )
 from skateid.stance import (
     CONFIDENCE_FLOOR,
@@ -744,6 +746,52 @@ def test_sweep_measures_a_closed_loop_not_the_endpoints():
     measured = net_sweep(observed)
     assert abs(measured) >= 180, f"a 223 deg trajectory must not read as {measured}"
     assert abs(measured) <= 360, measured
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="active_window selects on total variation, which a slow drift beats; "
+    "12.12 measured this collapsing kick-vs-heel separation from -108 to +2 deg. "
+    "Flip to peak |dtheta/dt| and this will xpass, which strict=True will then flag.",
+)
+def test_active_window_finds_the_flip_not_the_drift():
+    """Documents the *current* behaviour, which is wrong, so the bug stays visible.
+
+    The premise is right -- a flip is a fast event in a mostly-static clip, so the
+    sample budget should go where the board actually rotates. The implementation
+    is not: `active_window` maximises total variation, and a slow drift across
+    the clip accumulates more total variation than a real 0.3 s flip, so it
+    selects the drift. Measured on real clips this collapsed kick-vs-heel
+    separation from -108 deg to +2 deg (plan 12.12).
+
+    Marked xfail(strict) rather than deleted: the suite stays green, but the
+    moment the selection function is fixed this *xpasses* and pytest complains,
+    so the bug cannot be quietly forgotten.
+    """
+    drift = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22]          # slow, 2 deg/frame
+    flip = [0, 5, 60, -20, 70, -60, 30, -10, 20, -5, 8, 2]        # fast, large swings
+    series = drift[:5] + flip + drift[5:]
+    flip_start, flip_end = 5, 5 + len(flip)
+
+    window = active_window(series)
+    assert window is not None
+    start, end = window
+
+    # These hold today: the window is produced, it starts at or after the flip
+    # begins, and windowed_sweep tolerates missing frames instead of crashing on
+    # them (the first implementation raised TypeError feeding None into net_sweep).
+    assert flip_start <= start, f"window {start} starts before the flip at {flip_start}"
+    assert end <= len(series)
+    assert windowed_sweep(series)[0] != 0.0
+    assert windowed_sweep([3, None, 3, None, 3, 3])[0] == 0.0, "static board, no rotation"
+
+    # This is the known bug, and the reason for the xfail: the window overruns the
+    # flip into the trailing drift, because the objective rewards total travel
+    # rather than rate.
+    assert end <= flip_end, (
+        f"window ends at {end}, past the flip's end at {flip_end}: active_window "
+        "selects on total variation and so prefers the slow drift"
+    )
 
 
 def test_confusion_matrix_folds_low_support_classes_and_stays_readable():
