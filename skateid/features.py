@@ -206,18 +206,36 @@ def unwrap_angles(degrees: List[float]) -> List[float]:
 
 
 def net_sweep(degrees: List[float]) -> float:
-    """Total signed rotation across a clip, in degrees, after unwrapping.
+    """Total rotation travelled across a clip, in degrees, signed by direction.
 
-    Nearest multiple of 180 to the raw endpoint difference: the board ends up
-    flipped, so 360 and -360 and 180 are all "one flip" and the sign carries the
-    kick/heel information. Reported in degrees so a reader can check it against
-    the expected 360 without a unit conversion.
+    **Total variation, not endpoint difference.** A board that rotates a full 360
+    deg ends up exactly where it started, so an endpoint difference reports ~0 for
+    a textbook kickflip. That bug was live for two measurement rounds before it
+    was caught by reading an actual trajectory: the observed kickflip series
+    travelled 223 deg while its endpoints differed by 27. The statistic has to
+    measure the *path*, because the phenomenon is a closed loop.
+
+    Sign comes from the largest sustained excursion rather than the net endpoint,
+    since a real clip drifts and its endpoints do not determine which way the board
+    went. Snapped to a multiple of 180 because a rectangle has no facing, so a
+    full flip reads 360, a half 180, and the sign is the kick/heel information.
     """
     unwrapped = unwrap_angles(degrees)
     if len(unwrapped) < 2:
         return 0.0
-    total = unwrapped[-1] - unwrapped[0]
-    return float(round(total / 180.0) * 180.0)
+
+    travelled = float(sum(abs(b - a) for a, b in zip(unwrapped, unwrapped[1:])))
+    # Direction: the signed excursion of the unwrapped series from its starting
+    # value, which survives the drift that endpoint differencing does not.
+    excursion = unwrapped[-1] - unwrapped[0]
+    if abs(excursion) < 1e-9 and travelled > 0:
+        # Endpoints coincide (the closed-loop case). Fall back to the sign of the
+        # largest single step, which for a monotonic loop carries the direction.
+        excursion = max(unwrapped, key=lambda v: abs(v - unwrapped[0])) - unwrapped[0]
+    if abs(excursion) < 1e-9:
+        return 0.0
+    magnitude = round(travelled / 180.0) * 180.0
+    return float(magnitude if excursion > 0 else -magnitude)
 
 
 def board_angle(corners: np.ndarray) -> float:

@@ -868,7 +868,132 @@ both spent. What remains:
 **Not claimed:** no M2 result, and `probe --with-board` still deliberately not
 run. The gate is not evaluated.
 
-**Tooling added:** `skateid oracle --segmenter` so the comparison is reproducible.
+### 12.10 M2 step 1c: upscaling is a dead end, but two real bugs were found (2026-09-28)
+
+Two things came out of trying option 1 (upscale the crop), and the second one
+changes the picture materially.
+
+**Option 1 (upscale) does nothing.** Measured at 1x, 3x and 6x on the same frames:
+
+| upscale | measurements | distinct angles | median mask aspect |
+|---|---|---|---|
+| 1x | 867 | 78 | 0.50 |
+| 3x | 863 | 78 | 0.51 |
+| 6x | 863 | 75 | 0.51 |
+
+No movement at any scale. The bottleneck is not pixel count.
+
+**But the "shoes and shadow" diagnosis in §12.9 was wrong**, and it was wrong
+because of *our own* measurement. With `yolo11n-seg.pt` the actual masks are
+**aspect 0.37-0.40** — a clean 2.5:1 board shape, with stable 2.3-2.6:1 detection
+boxes and a 0.41-0.47 mask fill. The board **is** being segmented correctly. The
+0.62 aspect reported in §12.9 came from the Otsu arm, not from YOLO-seg.
+
+**Two real bugs, both found by looking rather than by trusting the aggregate:**
+
+1. **The angle histogram was a measurement artifact.** The 93-of-117 pileup at
+   exactly `0` and 19 at `-90` was Otsu returning a rounded rectangle, not the
+   board. Real masks give smooth continuous series: a kickflip clip reads
+   `21 21 23 27 ... 32 49 39 31 17 -21 -41 -43 -40 -20 ...` — a genuine
+   rotation crossing through vertical. **The signal was in the data the whole
+   time and the Otsu arm was throwing it away.** §12.9's conclusion "this is a data
+   problem" was premature; the real problem was that the default arm was the wrong
+   one.
+
+2. **`net_sweep` cannot detect a full rotation — by construction.** It measures
+   the *endpoint difference*. A board that rotates 360 deg **ends where it
+   started**, so a perfect kickflip scores ~0. On the observed trajectory:
+
+   | statistic | value |
+   |---|---|
+   | endpoint difference (`net_sweep`, used today) | **-27 deg** |
+   | total variation (path length actually travelled) | **223 deg** |
+
+   That is why the oracle reads 0 for so many clips: the statistic is wrong for
+   the phenomenon, regardless of segmentation quality. **This bug is present in
+   the synthetic tests too** and they did not catch it, because the synthetic
+   sequence happened to start and end at different angles.
+
+**Current status — still not passing, but for a now-understood reason.** With
+YOLO-seg and 60 frames: kick 8 % / heel 21 %, separation +28 deg, 38 % overall.
+The sweeps are dominated by the endpoint-difference bug, so **this number is a
+floor, not a measurement of the feature.** Fixing `net_sweep` to use total
+variation is a small change and must be done before the oracle is re-run;
+re-judging segmentation before then would be measuring the wrong thing.
+
+**Revised plan:**
+1. **Fix the sweep statistic** (endpoint -> total variation, with the direction
+   taken from the largest sustained excursion rather than the endpoint). Add a
+   synthetic test that starts and ends at the *same* angle, which is the case the
+   current tests miss.
+2. **Re-run the oracle** on the YOLO-seg arm. Only then is the result meaningful.
+3. Make YOLO-seg the default segmentation arm — it is measurably better and
+   §12.9's contrary reading came from testing the Otsu path.
+
+### 12.11 M2 step 1d: sweep bug fixed, oracle re-run — 55 %, still short (2026-09-28)
+
+`net_sweep` now measures **total variation** instead of endpoint difference, and
+the synthetic test that reproduces the real trajectory passes. Re-running the
+oracle on the YOLO-seg arm with 60 frames:
+
+| | before (12.9/12.10) | after the sweep fix |
+|---|---|---|
+| kick-family correct | 8-10 % | **30 %** (57 % with a global sign flip) |
+| heel-family correct | 21 % | **46 %** (50 % with a global sign flip) |
+| overall | 35-38 % | **52 %** (**55 %** with a global sign flip) |
+| kick − heel separation | +10 deg | **-108 deg** |
+
+**The separation is real and large now** — 108 degrees, versus 10 before. The fix
+to the statistic is what produced it, exactly as §12.10 predicted: the earlier
+number was a floor, not a measurement of the feature.
+
+**But the sign is inverted**: kick-family reads **-86 deg** and heel-family
+**+22 deg**. Negating globally lifts the overall score to 55 % and is almost
+certainly a convention error somewhere (image y-axis direction, or the sign the
+manifest assigns to `flip_type`) — **not yet identified, and not assumed**. 55 %
+is well short of the ~90 % needed for a usable feature, so a sign convention is
+not the remaining problem.
+
+**Magnitude does not discriminate flip count**, which is the second failure:
+
+| flip count | n | mean \|sweep\| | median |
+|---|---|---|---|
+| 1 | 50 | 295 deg | 270 |
+| 2 | 14 | 257 deg | 270 |
+
+A double kickflip and a single kickflip measure the *same*. So even with the sign
+fixed, the feature would not distinguish 1 from 2 flips. Both failures point at
+the same cause: **60 samples across a ~2 s clip still cannot resolve a rotation
+that takes ~0.3 s.** Each flip is 4-6 samples; the trajectory passes through
+intermediate angles far too coarsely for path length to be a reliable estimator of
+magnitude, and aliasing lets a double flip sample as a single one.
+
+**Where this actually leaves M2.** The step-1 question — "is there usable board
+rotation signal?" — now has a nuanced answer:
+
+- **Existence: yes, demonstrated.** A -108 deg kick-vs-heel separation is not
+  noise. The signal is real and it is the one pose cannot see.
+- **Reliability: no, not yet.** 55 % with an unresolved sign, and no magnitude
+  discrimination, means this cannot be the flip head's feature as built.
+- **The bottleneck is temporal resolution, not segmentation.** Upscaling changed
+  nothing (12.10); 60 frames changed the statistic but not the aliasing.
+
+**Next options, reassessed:**
+
+1. **Sample the rotation window, not the whole clip.** The trick's rotation occupies
+   a fraction of a second; the other ~1.7 s is approach and roll-away. Sampling
+   densely *only where the board is airborne and moving* (from the segmentation
+   mask's frame-to-frame change) would give 20-40 samples across the flip itself
+   rather than 6. This is now the most promising route and it is cheap.
+2. **Identify and fix the sign convention**, then re-measure. Cheap, but worth
+   doing *after* (1) — improving the estimator and fixing the sign at once would
+   make it impossible to tell which helped.
+3. **SAM** — still deferred; the segmentation is no longer the bottleneck.
+
+**Still not claimed:** no M2 result, and `probe --with-board` remains unrun. The
+gate is not evaluated, and would not yet be meaningful.
+
+
 
 
 
@@ -916,3 +1041,5 @@ later reader distinguish a considered revision from a moving target. The file st
 ---
 
 **Tooling delivered regardless** (all reusable if option 1-3 works):
+
+**Tooling added:** `skateid oracle --segmenter` so the comparison is reproducible.

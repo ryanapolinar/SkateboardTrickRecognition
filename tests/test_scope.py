@@ -690,7 +690,12 @@ def test_angles_are_unwrapped_across_the_wrap_boundary():
     # A smooth rotation must produce monotonically rising then falling values, not
     # jumps of 180 at the boundary.
     assert max(abs(b - a) for a, b in zip(unwrapped, unwrapped[1:])) < 90, unwrapped
-    assert net_sweep(smooth) == 0.0, "returns to the start, so no net rotation"
+    # A rise-and-return series travels 360 deg of path even though it ends where it
+    # started. Under the old endpoint-difference definition this read 0; the whole
+    # point of the fix is that a rotation out and back is a real rotation. The
+    # test below covers the case that must stay 0: a genuinely static board.
+    assert net_sweep(smooth) == 360.0, "out and back is 360 deg of travel, not zero"
+    assert net_sweep([5, 5, 5, 5]) == 0.0, "a static board has no rotation"
     assert unwrap_angles([]) == []
 
 
@@ -706,6 +711,39 @@ def test_segmentation_refuses_rather_than_guesses():
 
     # A box too small to segment is also a refusal, not a division by zero.
     assert segment_board(blank, np.array([0.0, 0.0, 3.0, 3.0])) is None
+
+
+def test_sweep_measures_a_closed_loop_not_the_endpoints():
+    """A full flip ends where it started, so endpoint differencing reports ~0.
+
+    This is the bug that survived two measurement rounds: `net_sweep` originally
+    returned the endpoint difference, so a textbook kickflip -- the board rotating
+    360 deg and arriving back at its starting angle -- scored as no rotation at
+    all. Found by reading a real trajectory (223 deg travelled, 27 deg endpoint
+    difference) rather than by any aggregate, and missed by the existing
+    synthetic tests because that series happened to start and end apart.
+
+    The starting and ending angle here are *identical on purpose*.
+    """
+    # 0 -> 180 -> 360 -> back to 0: a full revolution that closes on itself.
+    loop = [0, 45, 90, 135, 179, -135, -90, -45, 0, 45, 90, 135, 179, -135, -90, -45, 0]
+    forward = net_sweep(loop)
+    backward = net_sweep([-a for a in loop])
+
+    assert forward > 0, f"a positive loop must read positive, got {forward}"
+    assert backward < 0, f"a negative loop must read negative, got {backward}"
+    # A closed loop that travelled 720 deg must not read as 0.
+    assert abs(forward) >= 180, f"closed loop collapsed to {forward}"
+    assert abs(forward + backward) < 1e-6, "mirror loops must be equal and opposite"
+
+    # The real kickflip trajectory that exposed the bug: 223 deg travelled, 27 deg
+    # between endpoints. Endpoint differencing gives ~-27; the path does not.
+    observed = [21, 21, 23, 27, 21, 20, 22, 27, 26, 27, 23, 22, 28, 23, 25, 26, 27, 23,
+                21, 19, 18, 16, 32, 49, 39, 31, 17, -21, -41, -43, -40, -20, -19, -18,
+                -17, -12, -13, -13, -8, -8, -6, -8, -8, -5, -6]
+    measured = net_sweep(observed)
+    assert abs(measured) >= 180, f"a 223 deg trajectory must not read as {measured}"
+    assert abs(measured) <= 360, measured
 
 
 def test_confusion_matrix_folds_low_support_classes_and_stays_readable():
