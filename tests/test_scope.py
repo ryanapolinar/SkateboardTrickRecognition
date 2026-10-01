@@ -27,6 +27,7 @@ from skateid.features import (
     board_corners,
     board_features,
     board_features_from_angles,
+    board_summary,
     cache_key,
     load_features,
     net_sweep,
@@ -878,6 +879,68 @@ def test_board_feature_stream_handles_nan_angles():
     assert np.isfinite(out).all(), "NaN in the feature vector propagates to the LR"
     # Coverage is reported so a clip with no measurements is visibly empty.
     assert out[0, -1] == pytest.approx(1 / 6)
+
+
+def test_board_summary_compresses_to_four_scalars_and_keeps_the_dip():
+    """The board stream must shrink to a handful of scalars to be usable.
+
+    The full 2640-dim stream measurably *lowered* holdout macro-F1 (0.2048 ->
+    0.1476, plan 12.17) because 2448 pose dims already outnumber 110 training
+    rows. So the compression is not cosmetic -- it is what makes the board stream
+    usable at all.
+
+    The quantity preserved is **dip depth**, which is what plan 12.16 actually
+    demonstrated on real clips. `net_sweep` does not survive: it is an
+    accumulated-path measure and gave identical means for kick-family and all
+    other classes (-1.15 / -1.14).
+    """
+    frames = 48
+    # A flat board that dips mid-clip, the shape a kickflip produces. Column 5+i
+    # holds frame i's foreshortening.
+    flat = np.full(frames, 0.83, dtype=np.float32)
+    flat[22:26] = 0.59
+    board = np.zeros((frames, 55), dtype=np.float32)
+    for i in range(frames):
+        board[i, 5 + i] = flat[i]
+    summary = board_summary(board)
+
+    assert summary.shape == (4,)
+    assert summary[0] == pytest.approx(0.83 - 0.59, abs=0.01), "dip depth"
+    assert 0.4 < summary[1] < 0.6, f"dip should be mid-clip, got {summary[1]}"
+    assert summary[2] == pytest.approx(1.0), "all frames measured"
+    assert summary[3] == pytest.approx(0.83, abs=0.01), "peak foreshortening"
+
+    # A flat board with no dip has (near) zero depth -- so dip is a real
+    # discriminator and not an artefact of every clip having some variance.
+    quiet = np.zeros((frames, 55), dtype=np.float32)
+    for i in range(frames):
+        quiet[i, 5 + i] = 0.80
+    assert board_summary(quiet)[0] == pytest.approx(0.0)
+
+    # A block of NaN is "never measured": four explicit zeros, so an unmeasurable
+    # clip is visibly empty rather than looking like a board that never moved.
+    unmeasured = np.full((frames, 55), np.nan, dtype=np.float32)
+    for i in range(frames):
+        unmeasured[i, 5 + i] = np.nan
+    assert board_summary(unmeasured).tolist() == [0, 0, 0, 0]
+
+    # A block measured as literal zero is a *different* thing -- the board was seen
+    # and did not roll -- so it reports full coverage with zero dip depth. Telling
+    # those two apart is the entire point of writing NaN rather than 0.
+    flat_zero = np.zeros((frames, 55), dtype=np.float32)
+    for i in range(frames):
+        flat_zero[i, 5 + i] = 0.0
+    zero_summary = board_summary(flat_zero)
+    assert zero_summary[0] == pytest.approx(0.0)
+    assert zero_summary[2] == pytest.approx(1.0), "every frame was measured"
+
+    # NaN gaps must not be mistaken for the dip.
+    gapped = board.copy()
+    for i in range(frames):
+        if i == 23:
+            gapped[i, 5 + i] = np.nan
+    assert np.isfinite(board_summary(gapped)).all()
+    assert board_summary(gapped)[0] == pytest.approx(0.83 - 0.59, abs=0.01)
 
 
 def test_confusion_matrix_folds_low_support_classes_and_stays_readable():

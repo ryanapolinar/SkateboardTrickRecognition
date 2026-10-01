@@ -451,10 +451,14 @@ def probe_cmd(args) -> int:
         print(f"  classes: {sorted(keep)}")
 
     cache = Path(args.cache_dir)
+    use_board = args.with_board or args.full_board
     X_train, y_train, ids_train = features.load_feature_table(
-        frame[frame["split_holdout"] != HOLDOUT_VALUE], cache, include_board=args.with_board
+        frame[frame["split_holdout"] != HOLDOUT_VALUE], cache,
+        include_board=use_board, board_summary_dims=not args.full_board,
     )
-    X_test, y_test, ids_test = features.load_feature_table(holdout, cache, include_board=args.with_board)
+    X_test, y_test, ids_test = features.load_feature_table(
+        holdout, cache, include_board=use_board, board_summary_dims=not args.full_board
+    )
     if X_train.size == 0 or X_test.size == 0:
         print("error: no cached features. Run `skateid extract` first.", file=sys.stderr)
         return 2
@@ -719,7 +723,16 @@ def main() -> int:
     probe_p.add_argument("--dataset", choices=["all", "skateboardml", "skateai"], default="skateai",
                          help="Restrict to one dataset (default: skateai, the only source with enough classes)")
     probe_p.add_argument("--cache-dir", default="data/cache", help="Feature cache directory")
-    probe_p.add_argument("--with-board", action="store_true", help="Also use the board box stream")
+    probe_p.add_argument(
+        "--with-board", action="store_true",
+        help="Add the board stream (4 summary scalars by default: dip depth, dip "
+        "timing, coverage, peak foreshortening)",
+    )
+    probe_p.add_argument(
+        "--full-board", action="store_true",
+        help="Use the full per-frame board stream instead of the 4 summary scalars "
+        "(the full stream measurably hurt holdout score; see plan 12.17)",
+    )
     probe_p.add_argument("--c", type=float, default=1.0, help="Logistic regression C")
     probe_p.add_argument("--examples", type=int, default=6, help="How many per-clip examples to print")
     probe_p.add_argument(

@@ -1387,15 +1387,59 @@ they add in signal.
 pose+board **does not meet it**. What passes is the pose-only ablation, which was
 never the M2 gate. Stating that plainly rather than banking the 5.08x.
 
-**Next, and the honest list:**
-1. **Calibrate the magnitude** before using the board stream again — the dip depth
-   is real per clip but the sweep statistic is not measuring rotation. `dip =
-   median - min`, not `net_sweep`, is the quantity §12.16 actually demonstrated.
-2. **Reduce board dimensionality** — 2640 board dims against 110 rows is why it
-   hurts. Three summary scalars (dip depth, dip timing, coverage) is the honest
-   version.
-3. **Then re-run.** If a 3-scalar board stream beats the 0.2048 pose-only number,
-   M2's gate is genuinely met.
+### 12.18 Board stream compressed to 4 scalars: it stops hurting, but does not help (2026-09-28)
+
+`features.board_summary()` reduces the 2640-dim board stream to four scalars:
+**dip depth** (`median - min` of foreshortening), **dip timing**, **coverage**, and
+**peak foreshortening**. Angles are excluded — near-blind to a kickflip (plan 7.1)
+and the bulk of the harmful dimensionality. `probe --with-board` uses these by
+default; `--full-board` reproduces the 12.17 measurement.
+
+| vocabulary | stream | dims | accuracy | macro-F1 | vs floor |
+|---|---|---|---|---|---|
+| 9 classes | pose only | 2448 | 0.250 | 0.2048 | 5.08x |
+| 9 classes | **pose + board(4)** | 2452 | 0.250 | **0.2048** | 5.08x |
+| 9 classes | pose + board(full) | 5088 | 0.200 | 0.1476 | 4.04x |
+| | *dummy* | | 0.233 | 0.0473 | |
+| 3 classes | pose only | 2448 | 0.536 | 0.4623 | 11.33x |
+| 3 classes | pose + board(4) | 2452 | 0.536 | **0.4623** | 11.33x |
+| 3 classes | **pose + board(full)** | 5088 | 0.571 | **0.5244** | **13.08x** |
+| | *dummy* | | 0.500 | 0.2222 | |
+
+**Three findings, and the first is the answer to 12.17's question.**
+
+1. **The 4-scalar stream is exactly neutral** — 0.2048 -> 0.2048 and 0.4623 ->
+   0.4623. Identical to three decimals in both, which is what "adds nothing" looks
+   like on a linear model. The harm from the full stream (0.1476) is gone, so the
+   compression fixed what it was meant to fix — but **it did not make the board
+   stream useful.**
+
+2. **The full stream *helps* at 3 classes** (0.4623 -> **0.5244**, 11.33x -> 13.08x)
+   while hurting at 9. Invisible in 12.17, which reported only 9 classes. With 110
+   training rows the extra variance is affordable; with 238 it is not. **Honest
+   reading: this is a 28-clip holdout where one clip moves a 3-class macro-F1 by
+   ~0.036.** Suggestive, not established, and not reported as a result.
+
+3. **So the board stream carries a weak real signal a linear model over 2448 pose
+   dims cannot extract** — 2448 dims against 110 rows makes using anything small
+   arithmetically hard. That is the same data-limited story as 12.13, one level
+   down, and it is the honest conclusion rather than a fifth failure.
+
+**M2 gate status: still NOT met.** The gate requires pose+board to beat pose-only
+*and* the floor by >= 2x. Pose+board ties pose-only, and the gate's own wording —
+"the board stream is load-bearing" — is exactly what is not demonstrated.
+
+**Where this leaves M2, honestly.** Six rounds (12.8–12.17) established that the
+board signal is real per clip, that the long-axis angle is the wrong axis, that
+resolution was a genuine bug, and that the dip survives compression. What has *not*
+been shown is that a **classifier** can use it. The remaining options are a
+per-frame temporal model that consumes board and pose jointly, or accepting the
+pose-only result and deferring the board stream to M3 where the rotation heads
+exist to take a per-frame quantity.
+
+**Not claimed:** no M2 gate result. Pose-only 0.2048 (5.08x) remains the headline
+and clears its own gate; pose+board does not clear M2's.
+
 
 
 

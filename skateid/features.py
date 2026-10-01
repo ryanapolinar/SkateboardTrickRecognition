@@ -445,6 +445,58 @@ def segmented_angle(model, image, device: int = 0) -> Optional[float]:
     return float((angle + 90.0) % 180.0 - 90.0)
 
 
+def board_summary(board: np.ndarray) -> np.ndarray:
+    """Compress the per-frame board stream to four summary scalars.
+
+    The 2640-dim board stream *lowered* holdout macro-F1 from 0.2048 to 0.1476
+    (plan 12.17) -- not because the board carries no information, but because
+    2448 pose dims already outnumber 110 training rows, so extra noisy columns
+    cost more variance than they add. The fix is fewer, better numbers.
+
+    1. **dip depth** -- ``median - min`` of the foreshortening series. This is the
+       quantity plan 12.16 actually demonstrated on real clips (a flat board at
+       0.83 dipping to 0.59 through a kickflip), and the one ``net_sweep`` failed
+       to capture: kick-family and all other classes share a mean net_sweep of
+       -1.15/-1.14, because sweep is an accumulated-path measure rather than an
+       amplitude.
+    2. **dip timing** -- where in the clip the dip sits, as a fraction. Tricks
+       happen mid-clip, so a board dipping at frame 5 of 48 is something else.
+    3. **coverage** -- fraction of frames where the board was measurable, so a
+       clip with no detections is visibly empty rather than looking like a board
+       that never moved.
+    4. **peak foreshortening** -- the maximum, so amplitude is available on both
+       sides rather than only as a dip.
+
+    Angles are deliberately excluded: near-blind to a kickflip (plan 7.1), and the
+    bulk of the harmful dimensionality.
+    """
+    # The angle/foreshortening series is the (frames, frames) block starting at
+    # column 5: column 5+i is frame i's angle. Indexed [i, 5+i]. Slicing rows
+    # instead of columns -- board[:, 5:5+frames] -- reads the wrong axis entirely
+    # and reports the dip at frame 0; a test asserting the dip is mid-clip is what
+    # caught it.
+    per_frame = np.array([board[i, 5 + i] for i in range(board.shape[0])], dtype=np.float32)
+    # An unmeasurable frame is stored as NaN (features.board_features_from_angles
+    # writes NaN, not zero, precisely so it can be told apart from a measured 0).
+    # Coverage therefore counts finite entries, and an all-zero block -- every
+    # frame *measured* as 0 -- reports full coverage with zero depth, which is the
+    # honest reading.
+    usable = per_frame[np.isfinite(per_frame)]
+    if usable.size < 2:
+        return np.zeros(4, dtype=np.float32)
+    return np.array(
+def measure_clip_two_pass(
+
+        [
+            float(np.median(usable) - usable.min()),
+            float(usable.argmin()) / max(len(usable) - 1, 1),
+            float(usable.size) / max(board.shape[0], 1),
+            float(usable.max()),
+        ],
+        dtype=np.float32,
+    )
+
+
 def measure_clip_two_pass(
     path, fps: float, seg_model, pass1_frames: int = 24, native_frames: int = 20
 ):
@@ -852,34 +904,42 @@ def load_feature_table(
     cache_dir: Path,
     extractor_version: int = EXTRACTOR_VERSION,
     include_board: bool = False,
+    board_summary_dims: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """Build the ``(X, y, clip_ids)`` design matrix from the feature cache.
 
-    Clips with no cached features are **dropped, not zero-filled**. A missing
-    clip and a clip where the skater was genuinely absent both flatten to zeros,
-    and training on a field of zeros teaches the model that "no data" is a
-    meaningful pose -- which would be a fabricated signal rather than a
-    measured one. The count of dropped clips is the return value's companion
-    concern and is reported by the caller.
+    Clips with no cached features are **dropped, not zero-filled**. A missing clip
+    and a clip where the skater was genuinely absent both flatten to zeros, and
+    training on a field of zeros teaches the model that "no data" is a meaningful
+    pose -- which would be a fabricated signal rather than a measured one.
+
+    ``include_board`` adds the board stream. By default it adds the **4 summary
+    scalars** from :func:`board_summary` rather than the full per-frame stream:
+    the full stream measurably hurt holdout score (plan 12.17), because 2640 extra
+    dims against 110 training rows costs more variance than the signal is worth.
+    ``board_summary_dims=False`` restores the full stream for reproducing that
+    measurement.
     """
     features: List[np.ndarray] = []
     labels: List[str] = []
     clip_ids: List[str] = []
     for _, record in manifest.iterrows():
-        vector = pose_only_features(cache_dir, cache_key(record["clip_id"], extractor_version))
-        if vector is None:
+        loaded = load_features(cache_dir, cache_key(record["clip_id"], extractor_version))
+        if loaded is None:
             continue
-        features.append(vector)
+        body, board = loaded
+        if body.size == 0:
+            continue
+        row = body.reshape(-1)
+        if include_board:
+            extra = board_summary(board) if board_summary_dims else board.reshape(-1)
+            row = np.concatenate([row, extra])
+        features.append(row)
         labels.append(str(record["label"]))
         clip_ids.append(str(record["clip_id"]))
     if not features:
         return np.zeros((0, 0), dtype=np.float32), np.zeros(0, dtype=object), []
-    matrix = np.stack(features)
-    if include_board:
-        loaded = [load_features(cache_dir, cache_key(c, extractor_version)) for c in clip_ids]
-        board = np.stack([item[1].reshape(-1) for item in loaded])
-        matrix = np.concatenate([matrix, board], axis=1)
-    return matrix, np.array(labels, dtype=object), clip_ids
+    return np.stack(features), np.array(labels, dtype=object), clip_ids
 
 
 def body_quality(body: np.ndarray) -> Dict[str, float]:
