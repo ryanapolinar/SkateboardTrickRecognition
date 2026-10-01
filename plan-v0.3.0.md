@@ -1513,7 +1513,87 @@ board feature for classification. **Recommendation: stop pushing M2**, take the
 pose-only result as M1/M2's outcome, and do not build a temporal model inside a
 milestone that has already run long.
 
-### 12.28 Mirror-merging the vocabulary: macro-F1 0.2021 -> 0.2943 (2026-10-01)
+### 12.29 Rotation heads merged, and the shuvit answer is NO (2026-10-01)
+
+Two questions: does mirror-merging help the rotation heads, and is the yaw axis
+(shuvits) trackable where the roll axis was not.
+
+#### 1. Mirror-merging: the rotation heads gain nothing
+
+| target | classes | train | test | macro-F1 | acc | dummy |
+|---|---|---|---|---|---|---|
+| original names | 9 | 238 | 60 | 0.2021 | 0.233 | 0.233 |
+| mirror-merged names | 8 | 295 | 86 | **0.2943** | 0.302 | 0.209 |
+
+**Identical to 12.28, which is the answer: the gain came entirely from the
+classifier, not the heads.** The rotation-head name path (12.24) sat at 0.126 and
+merging does not rescue it, because the heads' problem was never class scarcity —
+it was that per-axis levels are estimated at 0.495–0.709 accuracy (12.24) and three
+mediocre axes do not compose into a correct triple. **The merged vocabulary is a
+change to the classifier's target space, and the rotation heads are not the place
+to spend effort next.** Recorded so this is not retried.
+
+#### 2. Shuvits: the yaw signal does NOT survive an honest baseline
+
+The intuition is sound and worth stating because it nearly fooled me: a shuvit is a
+**yaw** rotation, which is *in-plane* and therefore visible to a 2D camera, unlike
+the kickflip's roll about the long axis which 12.25 proved is silhouette-invariant.
+So yaw should be the recoverable one. **Measured on the video-disjoint holdout:**
+
+| target | result |
+|---|---|
+| `board_spin` level (0/1/2/3), balanced | macro-F1 0.4326, acc 0.472 (dummy 0.398) |
+| `board_spin` level, **unbalanced** | macro-F1 0.3111, acc 0.455 — **below its own dummy on macro-F1** |
+| shuvit vs no-shuvit, balanced | acc 0.750 vs dummy 0.804 → **below baseline** |
+| shuvit vs no-shuvit, **unbalanced** | acc 0.777 vs dummy 0.804 → **0.97x, i.e. at baseline** |
+
+**No. Shuvits are not trackable either**, and the reason is class imbalance plus a
+hard confusion, not the 2D problem:
+
+```
+holdout is 90 shuvit vs 22 non-shuvit; train is 271 vs 66
+shuvit-vs-not confusion (rows = truth):
+      predicted:  no-shuvit   shuvit
+   no-shuvit  (22)      4        18     <- misses 18 of 22
+   shuvit     (90)      7        83
+```
+
+83 of 90 shuvits are found, but only 4 of 22 non-shuvits — so the model has learned
+**"say shuvit"**, which is why the balanced/unbalanced gap is so large and why the
+unbalanced number sits exactly on the dummy. The board_spin multi-level confusion
+shows the same shape: level 3 (4 clips) is never predicted, and level 1/2 blur
+together (25 and 22 correct against 14 and 17 cross-errors).
+
+**This is 12.13's data-per-class wall again, not a 2D wall.** The yaw *mechanism* is
+fine — the information is present in the mask angles (`board_axis_angle` measures
+exactly this rotation). The failure is that yaw magnitude is confounded with the
+*rest* of the trick, so separating "no spin" from "180" needs more clips than exist.
+`board_spin=0` has only 88 clips and must be told apart from `board_spin=1`'s 190,
+which is the same 12-vs-36-clip situation as everything else here.
+
+**What is genuinely true, and worth keeping:** §7.1's axis mapping is not wrong, and
+the *reason* kickflips fail is specifically that roll is silhouette-invariant while
+yaw is not. So the board stream is worth keeping for **amplitude of in-plane
+rotation** — it is simply not strong enough at ~12 clips/class to be the headline.
+This section is the reason to stop treating M2 as the blocker.
+
+**Combined status of the three rotation quantities:**
+
+| axis | rotation | learnable? |
+|---|---|---|
+| `flip` | roll about long axis | **No** — silhouette-invariant (12.25), appearance fails at 854x480 (12.27) |
+| `board_spin` | yaw, in-plane | **No** — mechanism sound, confounded and data-starved |
+| `body_spin` | rider's own turn | **Partially** — 0.709 vs 0.602 dummy, the best axis we have |
+
+**So the honest summary of M3 is that only the rider's own body rotation is
+readable, and the board contributes nothing measurable at this scale.** That is a
+real, publishable negative result, and it is the moment to decide the product
+rather than continue tuning: 19 mirror classes at 0.2943 macro-F1 with a body-spin
+signal at 0.709 is what this dataset supports.
+
+**Not claimed:** no M2 or M3 gate result, and no published number changed. Both
+measurements are on the same video-disjoint holdout with the same pipeline as 12.28.
+
 
 Acting on 12.27's recommendation. All **41** expressible names collapse into
 **19** mirror classes (21 dictionary pairs, one self-pair and some overlapping),
