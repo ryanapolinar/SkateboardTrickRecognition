@@ -1061,8 +1061,66 @@ that discarding samples is what hurt.**
 this evidence that is the correct call, since the feature's behaviour changes sign
 and magnitude depending on which frames are included.
 
-**Note on cost:** the O(n²) window search over 60-frame series made the oracle run
-~20 min for 85 clips. If windowing is revisited it needs a linear-time scan.
+### 12.13 The overfitting diagnosis was mislabelled: it is data-per-class, not dimensions (2026-09-28)
+
+`skateid probe` reports **train macro-F1 1.000 against holdout 0.041** with 612
+features on 337 clips (1.8 dims/sample), and §12.5 read that as "a 612-dimensional
+vector cannot be estimated from 337 clips". **Tested directly, and that reading is
+wrong.** Four dimensionality reductions, all on the same split:
+
+| representation | dims | train F1 | holdout F1 |
+|---|---|---|---|
+| flat trajectory (today) | 612 | 1.000 | 0.0458 |
+| pooled statistics (mean/std/min/max) | 204 | 0.660 | 0.0372 |
+| xy only, confidence channels dropped | 408 | 1.000 | 0.0398 |
+| pooled + PCA-30 | 30 | 0.104 | 0.0450 |
+
+**Every one of them is at the floor (0.0401).** Cutting dimensions by 20x, removing
+the confidence channels, and regularising train F1 down to 0.104 all change
+nothing. If the problem were dimensionality, PCA-30 at train F1 0.104 would have to
+transfer better than a 612-dim model that memorises perfectly. It does not.
+
+**The actual constraint is clips per class.** Restricting to the five most common
+classes:
+
+| | 22-29 classes | 5 classes |
+|---|---|---|
+| training clips | 337 (~12/class) | 164 (~33/class) |
+| holdout macro-F1 | 0.041 | **0.2863** |
+| holdout accuracy | 0.107 | 0.333 |
+| dummy-majority accuracy | — | 0.333 |
+
+**0.2863 is 7.1x the 0.0401 floor — the 5x gate's threshold — and it crosses it.**
+But read the accuracy honestly: **0.333 is exactly the dummy baseline.** The model
+is not beating "always predict the majority class" on accuracy. The macro-F1 above
+chance comes from the tail, where a couple of low-support classes get a hit or two.
+
+**So the finding is a reframe, not a win.** M1's gate was set on a 22-class
+problem; the representation does not clear it, and *no amount of feature
+engineering moves it*, because the limit is ~12 clips per class, not the
+representation. The plan already anticipated this in §13 ("tiny data overfits")
+and in the decision to use only classes with >= 15 clips in Stage B.
+
+**What this implies, and what it does not:**
+- **Does not** mean the pose features are useless — 7.1x on 5 classes is well off
+  the floor.
+- **Does not** mean a transformer will help. A transformer shares weights across
+  time and regularises, but it cannot invent data. Given that four different
+  regularisers all fail identically, the evidence says the ceiling is data, not
+  capacity. **Building the transformer is now a much lower priority than it was**,
+  and §12.5's "reduce dimensionality first" is superseded by this section.
+- **Does** mean the honest M2/M3 framing is a **restricted-vocabulary** problem:
+  classes with enough clips to learn, with the long tail handled by the three
+  continuous rotation outputs (which is what plan §13 already defaults to) rather
+  than by 22-way classification.
+
+**Not claimed:** the 0.2863 is *not* an M1 or M2 gate result. It is a 5-class
+subset, scored on 42 holdout clips, with accuracy at the dummy baseline. It is
+evidence about the data ceiling, not a capability claim.
+
+**Still true and unchanged:** no generalisation claim (video-disjoint, not
+skater-disjoint), and `probe --with-board` remains unrun.
+
 
 
 
@@ -1115,3 +1173,6 @@ later reader distinguish a considered revision from a moving target. The file st
 **Tooling delivered regardless** (all reusable if option 1-3 works):
 
 **Tooling added:** `skateid oracle --segmenter` so the comparison is reproducible.
+
+**Note on cost:** the O(n²) window search over 60-frame series made the oracle run
+~20 min for 85 clips. If windowing is revisited it needs a linear-time scan.
