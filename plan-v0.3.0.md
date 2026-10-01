@@ -1513,7 +1513,79 @@ board feature for classification. **Recommendation: stop pushing M2**, take the
 pose-only result as M1/M2's outcome, and do not build a temporal model inside a
 milestone that has already run long.
 
-### 12.27 The face-contrast probe: built, verified on synthetic, FAILS on real footage (2026-10-01)
+### 12.28 Mirror-merging the vocabulary: macro-F1 0.2021 -> 0.2943 (2026-10-01)
+
+Acting on 12.27's recommendation. All **41** expressible names collapse into
+**19** mirror classes (21 dictionary pairs, one self-pair and some overlapping),
+because every trick's mirror is also in the vocabulary:
+
+```
+kickflip <-> heelflip          tre_flip <-> laser_flip
+varial_kickflip <-> varial_heelflip    hardflip <-> inward_heelflip
+bs_180_kickflip <-> fs_180_heelflip   bs_360_shuvit <-> fs_360_shuvit
+double_kickflip <-> double_heelflip    ... 19 classes total
+```
+
+**Pose-only, video-disjoint holdout, identical pipeline (C=0.1, balanced):**
+
+| vocabulary | classes | train | holdout | macro-F1 | accuracy | dummy |
+|---|---|---|---|---|---|---|
+| original, min 15 | 9 | 238 | 60 | 0.2021 | 0.233 | 0.233 |
+| **mirror-merged, min 15** | **8** | **295** | **86** | **0.2943** | **0.302** | 0.209 |
+| original, min 10 | 11 | 262 | 66 | 0.1519 | 0.197 | 0.212 |
+| mirror-merged, min 10 | 8 | 295 | 86 | 0.2943 | 0.302 | 0.209 |
+
+**0.2021 -> 0.2943 macro-F1, +46 % relative.** Note the *original* vocabulary at
+min 15 scores 0.233 against a dummy of 0.233 — i.e. **exactly at baseline**, which
+is the sharpest statement yet of why the unmerged vocabulary was hopeless: 12.19's
+0.2048 was never meaningfully above its own floor.
+
+**Checked for threshold games.** The gain is not an artefact of admitting more
+classes, which is the obvious way to fudge this. At a fixed low threshold
+(min_train_clips=5) where both vocabularies keep everything they can:
+
+| vocabulary | classes | macro-F1 | accuracy | dummy |
+|---|---|---|---|---|
+| original | 18 | 0.0989 | 0.117 | 0.149 |
+| mirror-merged | 11 | **0.2016** | **0.265** | 0.184 |
+
+Mirror-merging wins there too, and in *ratio to its own baseline* the effect is
+larger: **0.87x -> 1.41x**. The original vocabulary does not beat its dummy at all;
+the merged one does, which is the qualitative change that matters.
+
+**Why this works, mechanistically.** Two reasons, and they are the same reason:
+1. It **doubles the clips per class**, which is the binding constraint identified
+   in 12.13. Train rows go 238 -> 295 on the *same* vocabulary budget.
+2. It **removes the pairs that are provably unlearnable** — 12.25/12.27 established
+   that kick-vs-heel sign is not recoverable at this resolution, so those classes
+   were asking the model to fit noise. Merging deletes the unanswerable question
+   instead of grading on it.
+
+Point 2 is why this is not "lowering the bar". The 9-class 0.2021 number was
+measuring performance on questions the data cannot answer; 0.2943 measures it on
+questions it can.
+
+**The cost, stated plainly.** The recognizer can no longer distinguish a kickflip
+from a heelflip, an fs_180 from a bs_180, a varial kickflip from a varial heelflip.
+It answers with the merged name. **This is a permanent capability reduction and it
+must be surfaced in the output, not hidden** — the product should say
+"varial_flip (kickflip or heelflip)" rather than quietly emitting one of them.
+Note this also interacts with stance handling: stance is still an input (plan 3),
+but with mirror pairs merged the sign frame no longer changes the answer, so a
+merged vocabulary is *more* robust to a mis-stated stance, not less.
+
+**Honest status: still not publishable.** 0.2943 macro-F1 with 30 % accuracy is
+above baseline but far from a usable recognizer, and 12.24's abstention problem is
+untouched — merging classes does not give us a confidence signal, it removes some
+of the things we were confidently wrong about. That is a real gain and not a cure.
+
+**Suggested next measurement, not yet done:** the same merge applied to the
+rotation heads (12.24), where name accuracy was 0.126 against a median rank of
+17/41. Merging should help there for the same doubling reason, and the rotation
+representation was always the design that made the 1-clip tricks expressible — so
+"merged vocabulary via rotations" may still be the better architecture even though
+the sign itself is unreadable.
+
 
 Built `features.face_contrast` / `face_contrast_series` / `face_contrast_summary`
 per 12.26. The feature splits the board's **interior** into a dark group (grip tape)
