@@ -1513,7 +1513,81 @@ board feature for classification. **Recommendation: stop pushing M2**, take the
 pose-only result as M1/M2's outcome, and do not build a temporal model inside a
 milestone that has already run long.
 
-### 12.29 Rotation heads merged, and the shuvit answer is NO (2026-10-01)
+### 12.30 What we actually built: pose yes, board no — and how well pose works (2026-10-01)
+
+Putting the session's three quantities side by side and testing the standing doubt
+that pose may carry no usable signal either.
+
+#### Board: measurably harmful, not merely unhelpful
+
+Merged vocabulary, min_train_clips=15, video-disjoint holdout, identical pipeline:
+
+| features | dims | macro-F1 |
+|---|---|---|
+| **pose only** | 2448 | **0.2943** |
+| pose + board (4 summary scalars) | 2452 | 0.2837 |
+| pose + board (full per-frame stream) | 5088 | 0.2567 |
+
+So the board stream does **not** reduce to "detects that a skateboard is in the
+frame" — it is strictly worse than not having it, at both compressions. A presence
+detector would at worst be neutral. This is 12.17/12.18 re-confirmed after the
+12.25-12.27 rework, and it is the reason M2 is closed rather than merely paused.
+
+#### Pose: the signal is real, and the *sequence* is what carries it
+
+The doubt worth answering is "we may have built nothing". Measuring against a
+degenerate predictor that feeds every clip the **identical mean pose vector**:
+
+| representation | macro-F1 |
+|---|---|
+| **all 2448 dims, temporal (what we ship)** | **0.2943** |
+| temporal mean only (sequence discarded) | 0.1130 |
+| mean + std per joint (order discarded) | 0.1598 |
+| every 3rd frame only (sparser sampling) | 0.2261 |
+| **DUMB: same mean vector for every clip** | **0.0392** |
+
+**0.2943 vs 0.0392 is 7.5x the degenerate baseline**, and the ladder is the
+interesting part:
+
+- Collapsing the sequence to a mean costs **61 %** of the score (0.2943 -> 0.1130).
+  **The trajectory is the signal**, which is exactly what plan section 7 claimed and
+  what M1 was built to test. That claim is now supported by measurement.
+- Adding per-joint std recovers 0.1598, so *some* of the recoverable information is
+  unordered magnitude — but **retaining the order is worth another 0.135**, which
+  is the part only a temporal model can use.
+- Sparsifying to every 3rd frame gives 0.2261, so a good deal of the signal
+  survives 16 frames instead of 48. Practical if extraction cost ever matters.
+
+**The honest caveat on "successful pose detector":** this is not a pose *detector*
+in the sense of a production component, and 0.2943 is a weak classifier. What we
+have demonstrated is that **rider kinematics carry real, order-dependent,
+generalising signal** (the holdout is video-disjoint, so it is not memorising
+clips). That is the whythetrick-style insight — body kinematics are teachable
+signal — and it now has a number attached rather than an assumption.
+
+#### The three quantities, final state
+
+| quantity | status | number |
+|---|---|---|
+| rider pose / kinematics | **works** | 0.2943 macro-F1 (7.5x degenerate), 0.709 body-spin family acc |
+| board detection | works, but only ever confirmed the board was present | mask coverage 0.30-0.41 |
+| board rotation (roll / yaw) | **fails** | roll silhouette-invariant (12.25); yaw at baseline (12.29) |
+
+So the user's summary is **two-thirds right**: pose is a real, measured win, and
+board rotation is a real, measured loss. The part to correct is that the board work
+is not "a presence detector" — it is a presence detector **plus** angle measurements
+that carry no usable signal and cost accuracy when included. The angles are real
+measurements; they are simply confounded with everything else at ~12 clips/class.
+
+**What this implies for the product**, stated as a conclusion rather than a plan:
+the defensible claim is *"this reads the rider's movement, and that movement
+distinguishes trick families"*, not *"this identifies tricks"*. A coach-facing tool
+that scores body rotation, flags under-rotation, and refuses to name a trick is
+supported by these numbers. A trick-naming product is not.
+
+**Not claimed:** no gate result; 0.2943 is well short of usable naming. These are
+diagnostics on the existing cache, not new published numbers.
+
 
 Two questions: does mirror-merging help the rotation heads, and is the yaw axis
 (shuvits) trackable where the roll axis was not.
