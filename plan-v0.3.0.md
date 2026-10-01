@@ -1194,10 +1194,73 @@ frame budget recovers information that the source does not contain.
    shape of answer as the stance question: some of this is genuinely not
    recoverable from a 2-second clip of a small object.
 
-**Not claimed:** no M2 result. The gate is not evaluated, `probe --with-board`
-remains unrun, and the pose-only ablation (0.0406) stands as the only measured
-representation result in this project. §12.8-12.13 are a record of five attempts
-that did not work, kept because the reasoning errors are the useful part.
+### 12.15 M2 step 3: native resolution helps a lot, and still does not contain the flip (2026-09-28)
+
+§12.14's cheapest proposed test, run. **It is a real improvement, and it does not
+change the conclusion.**
+
+**First, a detail worth recording: the working resolution was distorting the
+footage.** The clips are stored at **854x480**, and `sample_frames` was resizing to
+**640x640** — stretching height by 33 % while shrinking width by 25 %, so the board
+was being both squashed and blurred. Measured on the same clip, same model:
+
+| working size | frames measured | max angular step | median mask aspect | median board rect |
+|---|---|---|---|---|
+| 640x640 (old) | 33/48 | 5 deg | 0.40 | 57x107 px |
+| **854x480 (native)** | **42/48** | **28 deg** | **0.23** | 35x103 px |
+| 1280x720 (upscaled) | 42/48 | 28 deg | 0.23 | 35x103 px |
+
+Every metric improves: coverage **+27 %**, max step **5.6x larger**, and the aspect
+drops to **0.23** — a proper 4:1 board shape rather than a squarish blob. Upscaling
+past native adds nothing, as expected. **So resolution was a genuine bug and it is
+fixed.**
+
+**And the flip is still not there.** Traces at native resolution, 48 samples:
+
+```
+kickflip (47/48 measured, max step 26 deg)
+  angles:  11   9   7   6   9   9  10   9  11  11  11  12  17  18  13  10   8   8  15  41  18  24  20   .   0 -13 -23 -23 -19 -28 -10 -11  -9  -8  -7  -6  -4  -5  -4  -4  -3  -3  -2  -3  -1   1   0   0
+heelflip (42/48 measured, max step 20 deg)
+  angles:   0   0  -0   0   0   0  -1  -1  -1  -1  -1  -1  -1   0  -1  -3  -6 -20 -40   . -41 -36 -33 -27  . -15  -8   0  .  .   8   0  -1  -5  -2  .  .  -3  -3  -2  -2  -3  -6  -6  -2  -3  -2  -2
+```
+
+The best any clip achieves is a **55 deg** single step. There is no 360-degree
+rotation in any trace, at any resolution, in any of the five attempts. What the
+traces show is rolling (0 -> -10), a catch correction (-20 -> -40), and roll-away
+(-40 -> 0). The board's *vertical* extent is what is being tracked, and a board
+rotating about its long axis barely changes that.
+
+**The revised explanation, sharper than §12.14's.** A kickflip is a rotation about
+the board's **long axis** — the axis that runs nose-to-tail. Projected to the image
+plane, that rotation **foreshortens the board rather than turning it**: the long
+axis barely changes angle, while the short axis swings through the full 360. A
+long-axis angle series is therefore *close to blind to the very motion that defines
+a flip*, even when the board is perfectly segmented. The 0.23 aspect confirms the
+masks are good now; they are simply reporting the wrong axis.
+
+**This supersedes §12.14's "the flip is too small / too edge-on"** — that was right
+about the *symptom* (no rotation visible) and wrong about the *cause*. With good
+masks, the axis being measured is still the wrong one.
+
+**What this means for M2.** The failure is now understood well enough to state what
+would be needed, and it is a real project rather than a tuning exercise:
+
+1. **Measure the short axis, not the long one** — track the board's *width*
+   direction, which is what sweeps through 360 during a flip. Cheap to test now
+   that the masks are reliable, and it follows directly from this diagnosis.
+2. **A tracker** to bridge the remaining gaps, still worth having.
+3. **Purpose-trained detector / hand-labelled corners** if (1) fails.
+
+**Not claimed:** no M2 result. The gate is not evaluated and `probe --with-board`
+remains unrun. **The pose-only ablation (0.0406) is still the only measured
+representation result in this project**, and §12.8-12.15 are a record of six
+attempts and four wrong diagnoses, kept because the corrections are the useful
+part.
+
+**Code note:** `sample_frames` is still called with 640x640 in the extraction path
+and the cache was built at that size. Any future board work must re-extract at
+854x480, and the pose cache is unaffected (pose does not care about board pixels).
+
 
 
 
