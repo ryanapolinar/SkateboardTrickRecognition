@@ -24,6 +24,9 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .taxonomy import STANCE_VALUES, Taxonomy
+from .video import sample_frames
+
 #: COCO pose keypoint order, as ultralytics emits it. Named rather than indexed
 #: by magic numbers so the feature code below is readable.
 KEYPOINT_NAMES: Tuple[str, ...] = (
@@ -205,6 +208,204 @@ def unwrap_angles(degrees: List[float]) -> List[float]:
     return out
 
 
+def rotation_window(
+    angles: List[Optional[float]], min_span: int = 3, max_span: int = 14
+) -> Optional[Tuple[int, int]]:
+    """The frame range where the board is rotating *fastest*.
+
+    A trick clip is ~2 s but the flip is ~0.3 s; the rest is approach, pop and
+    roll-away. An earlier version selected the **highest total-variation** window
+    and picked the slow drift instead of the flip -- drift accumulates more total
+    travel over 60 frames than a 0.3 s spin does, which collapsed kick-vs-heel
+    separation from -108 deg to +2 deg (plan 12.12).
+
+    **Peak rate, not total travel.** A flip is defined by high |dtheta/dt|, so the
+    objective is the largest single-step angular change inside the window, and the
+    window is kept short. Drift is slow by definition and cannot win.
+
+    Returns ``None`` when no rotation stands out, which is a real case (an
+    ollie) and must not be reported as a zero-degree rotation.
+    """
+    if not angles:
+        return None
+    measured = [(index, value) for index, value in enumerate(angles) if value is not None]
+    if len(measured) < min_span + 1:
+        return None
+
+    unwrapped = unwrap_angles([value for _, value in measured])
+    steps = [abs(b - a) for a, b in zip(unwrapped, unwrapped[1:])]
+    if not steps or max(steps) < 1.0:
+        return None
+
+    best, best_score = None, 0.0
+    for start in range(0, len(steps)):
+        for width in range(min_span, min(max_span, len(steps) - start) + 1):
+            window_steps = steps[start : start + width]
+            if not window_steps:
+                continue
+            # Peak rate dominates; total travel is only a tiebreak. A mean rate
+            # would re-admit drift, and total travel alone re-admits it worse.
+            score = max(window_steps) + 1e-6 * sum(window_steps)
+            if score > best_score:
+                best_score = score
+                best = (measured[start][0], measured[start + width][0])
+    return best
+
+
+def sample_native_window(
+    path,
+    window: Tuple[float, float],
+    fps: float,
+    count: int = 24,
+    size: Tuple[int, int] = (640, 640),
+):
+    """Re-decode ``window`` seconds of the clip at **native** frame rate.
+
+    This is the fix for the aliasing that has capped every board-rotation
+    measurement so far. A flip lasts ~0.3 s; sampling 60 frames across a ~2 s
+    clip gives ~6 samples of it, and direction is only recoverable above ~5
+    samples per rotation (plan 12.13's simulation). Worse, ~38 % of frames are
+    unmeasurable, so a 14-sample window spans ~30 original frames and the
+    effective rate is lower again.
+
+    Re-decoding the window instead of *selecting* from existing samples is the
+    only version that adds information. Selection cannot: it can only discard,
+    and the -108 deg whole-clip result shows discarding is what hurt.
+
+    ``window`` is in seconds as ``(start, end)`` and may be fractional -- a
+    0.3 s flip is 9 frames at 30 fps.
+    """
+    import cv2
+
+    capture = cv2.VideoCapture(str(path))
+    if not capture.isOpened():
+        raise OSError(f"cannot open video {path}")
+    try:
+        total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        native_fps = capture.get(cv2.CAP_PROP_FPS) or fps
+        start = max(0, int(round(window[0] * native_fps)))
+        end = int(round(window[1] * native_fps))
+        if total > 0:
+            end = min(total - 1, end)
+        span = end - start + 1
+        if span <= 0:
+            return np.zeros((0, size[1], size[0], 3), dtype=np.uint8), []
+
+        capture.set(cv2.CAP_PROP_POS_FRAMES, start)
+        want = min(count, span)
+        frames: List[np.ndarray] = []
+        for _ in range(want):
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                break
+            if (frame.shape[1], frame.shape[0]) != size:
+                frame = cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
+            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        if not frames:
+            return np.zeros((0, size[1], size[0], 3), dtype=np.uint8), []
+        while len(frames) < want:  # pad if the decode came up short
+            frames.append(frames[-1])
+        return np.stack(frames), list(range(start, start + len(frames)))
+    finally:
+        capture.release()
+
+
+def window_in_seconds(window, frame_indices, fps: float):
+    """Convert a window of *sample indices* into seconds using the sample grid.
+
+    ``frame_indices[i]`` is the source frame sample ``i`` came from, so the
+    conversion stays exact even though samples are evenly spaced in time rather
+    than contiguous.
+    """
+    if not frame_indices or window[0] < 0:
+        return 0.0, 0.0
+    start_frame = frame_indices[window[0]]
+    end_frame = frame_indices[min(window[1], len(frame_indices) - 1)]
+    return start_frame / max(fps, 1e-6), (end_frame + 1) / max(fps, 1e-6)
+
+
+def segmented_angle(model, image, device: int = 0) -> Optional[float]:
+    """Board long-axis angle from a YOLO *segmentation* mask, or ``None``.
+
+    The measurably better arm: section 12.9 recorded that this finds the board in
+    ~84 % of frames versus Otsu's much lower rate, with clean 2.5:1 mask aspect
+    (0.37-0.40) where a real board is ~4:1. The 0.62 "square blob" that 12.9
+    mistakenly attributed to the segmenter came from the Otsu arm.
+
+    Returns ``None`` rather than a placeholder whenever the board is absent or the
+    mask is degenerate, so "not measured" never masquerades as "measured 0".
+    """
+    import cv2
+
+    result = model.predict(image, verbose=False, device=device)[0]
+    if result.masks is None or result.boxes is None:
+        return None
+    best, best_conf = None, 0.25
+    for mask, cls, conf in zip(result.masks.data, result.boxes.cls, result.boxes.conf):
+        if model.names[int(cls)] != "skateboard" or float(conf) <= best_conf:
+            continue
+        best, best_conf = mask, float(conf)
+    if best is None:
+        return None
+    binary = (best.cpu().numpy() > 0.5).astype(np.uint8)
+    points = cv2.findNonZero(binary)
+    if points is None or len(points) < 4:
+        return None
+    (_, _), (w, h), angle = cv2.minAreaRect(points)
+    if w < 2 or h < 2:
+        return None
+    if w < h:
+        angle += 90.0
+    return float((angle + 90.0) % 180.0 - 90.0)
+
+
+def measure_clip_two_pass(
+    path, fps: float, seg_model, pass1_frames: int = 24, native_frames: int = 20
+):
+    """Two-pass board measurement: locate the flip, then re-decode it densely.
+
+    Pass 1 samples the whole clip coarsely and finds the **rotation window**
+    (:func:`rotation_window`, peak |dtheta/dt|). Pass 2 re-decodes just that
+    window at native frame rate and measures the sweep there.
+
+    This is the only approach tried that actually **adds** information. Every
+    earlier attempt selected from an already-taken 60-frame grid, which can only
+    discard samples -- and discarding is measurably what hurt (plan 12.12: the
+    -108 deg whole-clip separation collapsed to +2 deg once a window was chosen).
+
+    Returns ``(sweep, window_seconds, n_native_measured, n_native_total)``.
+    """
+    batch = sample_frames(path, count=pass1_frames, size=(640, 640))
+    pass1 = [segmented_angle(seg_model, frame, 0) for frame in batch]
+    window = rotation_window(pass1)
+
+    if window is None:
+        usable = [value for value in pass1 if value is not None]
+        sweep = net_sweep(usable) if len(usable) >= 2 else 0.0
+        return sweep, (0.0, 0.0), len(usable), pass1_frames
+
+    # Approximate seconds from the uniform pass-1 grid, then re-decode natively.
+    # Bounded tightly: `rotation_window` is measured in *pass-1 sample indices*, and
+    # with 24 samples over a ~2 s clip each index is ~0.08 s, so an unconverted
+    # index (the earlier bug here) padded the window to the whole clip and
+    # measured nothing useful. The flip is ~0.3 s, so the window is capped at
+    # ~0.6 s and only widened if the decoded span came up empty.
+    per_sample = max(fps, 1e-6) / max(pass1_frames - 1, 1)
+    start_s = max(0.0, window[0] * per_sample - 0.05)
+    end_s = window[1] * per_sample + 0.10
+    end_s = min(max(end_s, start_s + 0.2), start_s + 0.6)
+
+    native, _ = sample_native_window(path, (start_s, end_s), fps, count=native_frames)
+    if native.shape[0] == 0:
+        usable = [value for value in pass1 if value is not None]
+        return (net_sweep(usable) if len(usable) >= 2 else 0.0), (start_s, end_s), 0, pass1_frames
+
+    angles2 = [segmented_angle(seg_model, frame, 0) for frame in native]
+    measured = [value for value in angles2 if value is not None]
+    sweep = net_sweep(measured) if len(measured) >= 2 else 0.0
+    return sweep, (start_s, end_s), len(measured), len(native)
+
+
 def active_window(
     angles: List[Optional[float]], min_span: int = 4, max_span: int = 20
 ) -> Optional[Tuple[int, int]]:
@@ -261,7 +462,7 @@ def windowed_sweep(angles: List[Optional[float]]) -> Tuple[float, int, int]:
     The unmeasurable frames are removed before slicing, so no ``None`` can reach
     :func:`net_sweep`.
     """
-    window = active_window(angles)
+    window = rotation_window(angles)
     usable = [value for value in angles if value is not None]
     if window is None:
         if len(usable) < 2:

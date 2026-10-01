@@ -429,8 +429,8 @@ eval baseline), `fastapi`, `uvicorn`, `python-multipart`, `opencv-python`, `nump
 |---|---|---|
 | **M0** half day | uv env + skeleton + download 222 clips + manifest + both splits + B0/B1/B2 | `skateid train && skateid eval` prints a confusion matrix + a floor |
 | **M1** 1-2 days | pull SkateAI's 449 BATB clips in (12 source videos -> 449 cuts); CUDA torch; goofy/regular as an input; **pose features + extraction pipeline** | 671 clips ingested and feature-cached (671/671, 0 failures); stance as an override-only input with both-stances naming; **pose-only LR measured on the video-disjoint holdout as an ABLATION** (0.0406 = 1.01x the VideoMAE floor — see §12.5). No accuracy gate: pose alone is provably insufficient for mirror pairs (§12.7), so this milestone's job was to build and measure the pipeline |
-| **M2** 1-2 days | **board corners + long-axis angle (the missing axis)**; pose+board tiny transformer | **pose+board beats the best measured holdout floor (0.0401) by >= 5x macro-F1 (>= 0.20)**, with the confusion matrix published; **pose-only stays reported as the ablation**. The board stream must also be shown load-bearing — mirror pairs separable in the confusion matrix — since that is the hypothesis M1 existed to test. Still not a skater-disjoint claim. Gates restructured 2026-09-28, see §12.7 |
-| **M3** 2-4 days | `skateid serve` end-to-end; more heads (flip / board / body); abstain calibration; exploit SkateAI's 31-class compositional labels | all three rotation heads live; correct-or-abstained >= 90 % **while abstaining on <= 30 % of clips** (see §12.7); web page shows trick or "not sure" in <2 s |
+| **M2** 1-2 days | **board corners + long-axis angle** (the axis pose cannot see); re-decode the rotation window at native fps | **The board stream is load-bearing, measured on a restricted vocabulary.** Gate: on the classes with >= 30 training clips, pose+board beats pose-only **and** beats the best measured floor (0.0401) by >= 2x, with **kick/heelflip confusion reduced** in the confusion matrix — the qualitative check a number cannot fake. Restricted vocabulary because §12.13 showed the 22-class problem is data-limited (~12 clips/class), not representation-limited. Still not a skater-disjoint claim |
+| **M3** 2-4 days | `skateid serve` end-to-end; **three continuous rotation heads (flip / board_spin / body_spin)** as the primary output, with a **restricted-vocabulary** classifier over them; abstain calibration; the tail carried by the rotation heads rather than by 22-way classification | all three rotation heads live and each predicts its own angle within tolerance; **correct-or-abstained >= 90 % while abstaining on <= 30 % of clips**; the classifier covers only classes with >= 30 clips and says so; web page shows trick or "not sure" in <2 s |
 | **M4** optional | web polish (annotate toggle, top-3 list, batch in page); ONNX export; distill board -> YOLO26-OBB | < 0.5 s/clip |
 
 ### 12.1 M0 status as built, plus the M1 SkateAI pull (2026-09-27)
@@ -1114,12 +1114,91 @@ and in the decision to use only classes with >= 15 clips in Stage B.
   continuous rotation outputs (which is what plan §13 already defaults to) rather
   than by 22-way classification.
 
-**Not claimed:** the 0.2863 is *not* an M1 or M2 gate result. It is a 5-class
-subset, scored on 42 holdout clips, with accuracy at the dummy baseline. It is
-evidence about the data ceiling, not a capability claim.
+| | |
+|---|---|
+| **the vocabulary restriction** | The classifier's target set is **classes with >= 30 training clips**, decided from the manifest and reported in the output, never silently applied. Everything else stays reachable through the three continuous rotation heads |
+| **why 30** | §12.13 measured ~12 clips/class as too few to learn (22-class holdout 0.041) and ~33 clips/class as workable (5-class 0.2863). 30 is the smallest round number inside the range that worked, chosen from data rather than taste |
+| **the rotation heads are primary** | A `tre_double_flip` with 1 clip is still fully expressible as (flip=+2, board_spin=+1, body_spin=0). The vocabulary restriction limits *classification*, not *coverage* |
+| **what the gate must also show** | **Accuracy above the dummy-majority baseline**, which the 5-class result did *not* reach (0.333 = 0.333). Macro-F1 alone is not sufficient evidence: on a small holdout it can clear a threshold while the model still loses to always guessing the most common class |
+| **tail handling** | The long tail is not dropped. It is represented by the rotation heads, per plan §13's existing decision. A new trick that shares another's rotations is a data change, not a code change |
+| **the ablation stays** | Pose-only is reported beside pose+board on the *same* restricted vocabulary. Without it, "the board stream helped" is unfalsifiable |
 
-**Still true and unchanged:** no generalisation claim (video-disjoint, not
-skater-disjoint), and `probe --with-board` remains unrun.
+
+### 12.14 M2 step 2: the rotation window is the duration of the board's *visibility*, and the flip is already over (2026-09-28)
+
+Step 1's diagnosis (aliasing, fixable by denser sampling) was **wrong again**, and
+reading the traces settles it. Frame-level traces at 48 samples, `|step|` = degrees
+of change between consecutive measurements:
+
+```
+kickflip  (2.24 s, measured 43/48)
+  angles:  21  23  27  20  20  22  26  27  23  28  28  25  26  27  21  19  18  16  32  .  .  39  31  17  . -21 -41 -40  .  . -20 -19 -18 -17 -13 -13  -8  -9  -6  -8  -5  -6  -6  -5  -5  -5  -5  -6   0
+  |step|:   2   3   7   1   2   3   2   4   5   0   3   1   1   6   2   1   2  16   7   8  14  38  20   1  20   1   1   2   3   1   5   1   2   1   3   1   0   0   1   1   1   6
+```
+
+**The board is visible for the entire clip and only ever turns about 40 degrees.**
+It goes 21 -> 17 (rolling), then -21 -> -41 (a small correction as it catches),
+then -20 -> -5 (rolling away). **There is no 360-degree rotation anywhere in this
+trace.** The kickflip is not in the measured data at all.
+
+The same holds for the heelflips, where the only large steps (38-142 deg) coincide
+with **gaps in measurement** -- the board was not segmented, then reappeared at a
+different angle. A 142-deg "step" spanning a `None` is the unwrapper inventing
+motion that was never observed.
+
+**The actual conclusion: the 48-frame grid is not undersampling a flip. The flip
+is not visible to this pipeline at all.** The whole "aliasing" explanation in
+12.13's simulation described a phenomenon that is not present in these clips.
+
+Why the board shows no spin: at 640x640 the board is ~110x45 px. A skateboard
+flipping under a rider is, for most of its rotation, **edge-on to the camera** --
+a few pixels tall, heavily motion-blurred, frequently behind a leg. The
+segmenter either misses it entirely (the `None`s) or returns a mask of whatever
+is in the box. `minAreaRect` on a 3-pixel-tall smear is close to meaningless, and
+it returns a near-square blob, which is the 0.5 aspect measured throughout.
+
+**This retro-explains every earlier number, including the good ones:**
+
+| observation | explanation |
+|---|---|
+| the -108 deg "separation" (12.11) | kick and heel clips differ in *where* the unmeasured gaps fall and in the drift direction, not in rotation. The separation was an artifact of gap placement |
+| 1 flip and 2 flips measuring the same (12.11) | neither is measured at all; both are the same roll |
+| 93 of 117 angles being exactly 0 (12.9) | degenerate masks, not rotation |
+| upscaling doing nothing (12.10) | more pixels on a 3-pixel-tall smear is still a smear |
+| 60 frames not helping (12.9) | there is nothing to sample more finely |
+
+**Upscaling, more frames, and windowing were all treating a signal-extraction
+problem as a sampling problem.** The `net_sweep` fix in 12.11 was real and worth
+keeping -- it is simply correct on its own terms, and the improvement it appeared
+to produce was not the rotation being measured better.
+
+**What this rules out, concretely.** Board rotation is *not* recoverable from
+671 clips of 640x640 BATB footage by any thresholding or minAreaRect method.
+The board is too small and too often edge-on. No amount of cleverer windowing or
+frame budget recovers information that the source does not contain.
+
+**What would work, and what it costs — the honest list:**
+
+1. **Higher source resolution.** The manifest records 640x640 because that is what
+   `sample_frames` resizes to. Decoding at native resolution (the clips are
+   recorded much larger) gives a board 3-5x more pixels, which is the difference
+   between a 3-pixel smear and a measurable deck. **Cheapest possible test, and it
+   should be the next thing tried** -- it directly addresses the diagnosis.
+2. **A tracker rather than per-frame detection.** A board spinning smoothly should
+   be *predicted* forward between detections; segmentation models do not do this,
+   and the unmeasured gaps in the middle of every trace are exactly where the spin
+   happens.
+3. **A purpose-trained board detector** (or hand-labelled corners). Real project.
+4. **Give up on board rotation from this footage** and lean on the rotation heads
+   with pose plus a user-supplied flip direction -- which, notably, is the same
+   shape of answer as the stance question: some of this is genuinely not
+   recoverable from a 2-second clip of a small object.
+
+**Not claimed:** no M2 result. The gate is not evaluated, `probe --with-board`
+remains unrun, and the pose-only ablation (0.0406) stands as the only measured
+representation result in this project. §12.8-12.13 are a record of five attempts
+that did not work, kept because the reasoning errors are the useful part.
+
 
 
 

@@ -284,34 +284,14 @@ def baselines_cmd(args: argparse.Namespace) -> int:
 def _segmented_angle(model, image, device: int):
     """Board angle from a YOLO *segmentation* mask, or ``None``.
 
-    Used by ``skateid oracle --segmenter``. Kept as a comparison arm rather than
-    the default: it finds the board more often than Otsu (12.8/12.9), which makes
-    it look like an upgrade, but the measured angle is no better. The evidence
-    for that is in plan 12.9; the flag exists so the claim can be re-checked when
-    the models are updated.
+    Thin wrapper over :func:`skateid.features.segmented_angle`, kept here so the
+    oracle's call sites read the same way. Section 12.9 recorded that this arm
+    segments the board far more reliably than Otsu; the Otsu arm is retained as a
+    comparison, not as the default.
     """
-    import cv2
+    from .features import segmented_angle
 
-    result = model.predict(image, verbose=False, device=device)[0]
-    if result.masks is None or result.boxes is None:
-        return None
-    best, best_conf = None, 0.25
-    for mask, cls, conf in zip(result.masks.data, result.boxes.cls, result.boxes.conf):
-        if model.names[int(cls)] != "skateboard" or float(conf) <= best_conf:
-            continue
-        best, best_conf = mask, float(conf)
-    if best is None:
-        return None
-    binary = (best.cpu().numpy() > 0.5).astype(np.uint8)
-    points = cv2.findNonZero(binary)
-    if points is None or len(points) < 4:
-        return None
-    (_, _), (w, h), angle = cv2.minAreaRect(points)
-    if w < 2 or h < 2:
-        return None
-    if w < h:
-        angle += 90.0
-    return float((angle + 90.0) % 180.0 - 90.0)
+    return segmented_angle(model, image, device)
 
 
 def oracle_cmd(args) -> int:
@@ -352,21 +332,29 @@ def oracle_cmd(args) -> int:
             batch = sample_frames(record["file_path"], count=args.frames, size=(640, 640))
         except (OSError, ValueError):
             continue
-        angles = []
-        for image in batch:
-            if seg_model is not None:
-                angles.append(_segmented_angle(seg_model, image, device))
-            else:
-                angles.append(features._measure_angle(image, features.detect_board(board_model, image, device=device)))
-        usable = [a for a in angles if a is not None]
-        if args.window:
-            # Measure only the rotation window, not the whole clip. The flip is
-            # ~0.3 s of a ~2 s clip, so a fixed grid spends most of its samples
-            # on frames where nothing rotates.
-            sweep, start, end = features.windowed_sweep(angles)
+        if args.two_pass and seg_model is not None:
+            # Locate the flip, then re-decode just that window at native fps.
+            sweep, span, measured_n, native_n = features.measure_clip_two_pass(
+                record["file_path"], float(record["fps"] or 30.0), seg_model
+            )
+            start, end = f"{span[0]:.2f}-{span[1]:.2f}s"
+            coverage = measured_n / max(native_n, 1)
         else:
-            sweep = features.net_sweep(usable) if len(usable) >= 2 else 0.0
-            start, end = 0, len(angles) - 1
+            angles = []
+            for image in batch:
+                if seg_model is not None:
+                    angles.append(_segmented_angle(seg_model, image, device))
+                else:
+                    angles.append(features._measure_angle(
+                        image, features.detect_board(board_model, image, device=device)))
+            usable = [a for a in angles if a is not None]
+            if args.window:
+                sweep, w_start, w_end = features.windowed_sweep(angles)
+                start, end = str(w_start), str(w_end)
+            else:
+                sweep = features.net_sweep(usable) if len(usable) >= 2 else 0.0
+                start, end = 0, len(angles) - 1
+            coverage = len(usable) / max(args.frames, 1)
         rows.append({
             "clip_id": record["clip_id"],
             "label": record["label"],
@@ -375,8 +363,8 @@ def oracle_cmd(args) -> int:
             "board_spin": int(record["board_rotation_number"]),
             "expected_sign": -1 if "heel" in str(record["flip_type"]) else (1 if "kick" in str(record["flip_type"]) else 0),
             "measured_sweep": sweep,
-            "window": f"{start}-{end}" if start >= 0 else "",
-            "angle_coverage": len(usable) / max(args.frames, 1),
+            "window": f"{start}-{end}",
+            "angle_coverage": coverage,
         })
 
     report = pd.DataFrame(rows)
@@ -694,7 +682,13 @@ def main() -> int:
     )
     oracle_p.add_argument(
         "--window", action="store_true",
-        help="Measure only the rotation window (highest-variation span) instead of the whole clip",
+        help="Measure only the rotation window instead of the whole clip (known "
+        "regression, kept for reproducing 12.12)",
+    )
+    oracle_p.add_argument(
+        "--two-pass", action="store_true",
+        help="Locate the rotation window, then re-decode it at native fps (the only "
+        "variant that adds information rather than selecting from existing samples)",
     )
 
     probe_p = subparsers.add_parser(
