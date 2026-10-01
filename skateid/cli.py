@@ -715,7 +715,7 @@ def main() -> int:
     )
     extract_p.add_argument("--cache-dir", default="data/cache", help="Where to write .npz features")
     extract_p.add_argument("--out", default="data/feature_quality.csv", help="Quality report CSV")
-    extract_p.add_argument("--frames", type=int, default=12, help="Frames sampled per clip")
+    extract_p.add_argument("--frames", type=int, default=48, help="Frames sampled per clip")
     extract_p.add_argument("--pose-model", default="yolo11n-pose.pt", help="Pose model weights")
     extract_p.add_argument("--board-model", default="yolo11n.pt", help="Board detection model weights")
     extract_p.add_argument("--no-board", action="store_true", help="Skip the board stream (pose only)")

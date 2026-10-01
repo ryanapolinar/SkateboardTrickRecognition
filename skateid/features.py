@@ -42,7 +42,27 @@ KEYPOINT_COUNT = len(KEYPOINT_NAMES)
 KEYPOINT_MIN_CONF = 0.3
 
 #: Bumped whenever the feature definition changes, so the cache invalidates.
-EXTRACTOR_VERSION = 1
+#:
+#: **v2 (2026-09-28)**: resolution is now native (854x480, was a distorted 640x640
+#: that stretched height 33 % and shrank width 25 %) and the board stream grew
+#: from 5 to 6 dims, adding **foreshortening** -- the quantity that actually
+#: tracks a kickflip (plan 7.1, 12.16).
+#:
+#: The bump is the important part. M0's cache was keyed on `clip_id` alone and
+#: silently reused features after a resolution change; every downstream score
+#: still came out, so the only symptom was inexplicably flat results. Keying on
+#: the extractor version makes that class of bug structurally impossible rather
+#: than a thing future-me has to remember.
+EXTRACTOR_VERSION = 2
+
+#: Working resolution for extraction. The clips are stored 854x480; resizing to a
+#: square distorts the board and costs 27 % of the measured frames (plan 12.15).
+NATIVE_SIZE: Tuple[int, int] = (854, 480)
+
+#: Frames sampled per clip. 48 rather than 12 because foreshortening is a
+#: *transient* dip: at 12 frames across a 2 s clip the dip is sampled too sparsely
+#: to survive averaging.
+DEFAULT_FRAMES = 48
 
 
 def load_pose_model(name: str = "yolo11n-pose.pt", device: Optional[object] = None):
@@ -561,6 +581,17 @@ def net_sweep(degrees: List[float]) -> float:
     if len(unwrapped) < 2:
         return 0.0
 
+    # Guard against non-finite input reaching the arithmetic. `board_features_
+    # from_angles` writes NaN for an unmeasurable frame, and NaN silently
+    # poisons every sum below until it fails as an int conversion much further
+    # from the cause than it should.
+    finite = [value for value in degrees if value is not None and np.isfinite(value)]
+    if len(finite) < 2:
+        return 0.0
+    unwrapped = unwrap_angles(finite)
+    if len(unwrapped) < 2:
+        return 0.0
+
     travelled = float(sum(abs(b - a) for a, b in zip(unwrapped, unwrapped[1:])))
     # Direction: the signed excursion of the unwrapped series from its starting
     # value, which survives the drift that endpoint differencing does not.
@@ -698,8 +729,8 @@ def extract_clip(
     path: Path,
     pose_model,
     board_model,
-    frames: int = 12,
-    size: Tuple[int, int] = (640, 640),
+    frames: int = DEFAULT_FRAMES,
+    size: Tuple[int, int] = NATIVE_SIZE,
     device: int = 0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Extract one clip's body and board streams.
@@ -778,7 +809,17 @@ def board_features_from_angles(
     series = [np.nan if angle is None else angle for angle in angles]
     for index, value in enumerate(series[:frames]):
         out[index, 5 + index] = value
-    usable = [angle for angle in series if angle is not None]
+
+    # An unmeasurable frame must be a **zero plus the coverage flag**, never a NaN
+    # left in the vector. StandardScaler would carry the NaN into the scaler's
+    # mean and variance, and one NaN poisons the whole fitted transform -- a
+    # silent, catastrophic failure that produces scores rather than an error.
+    # Zero is safe *because* the coverage scalar in the last column says how much
+    # of the series was real.
+    out[:, 5 : 5 + frames] = np.nan_to_num(out[:, 5 : 5 + frames], nan=0.0)
+
+    # `usable` must exclude NaN as well as None, for the same reason.
+    usable = [angle for angle in series if angle is not None and np.isfinite(angle)]
     # Normalised to 1.0 per full rotation so the LR sees a bounded input.
     out[0, 5 + frames] = net_sweep(usable) / 360.0 if len(usable) >= 2 else 0.0
     out[0, 5 + frames + 1] = len(usable) / max(frames, 1)

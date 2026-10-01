@@ -26,6 +26,7 @@ from skateid.features import (
     board_axis_angle,
     board_corners,
     board_features,
+    board_features_from_angles,
     cache_key,
     load_features,
     net_sweep,
@@ -844,6 +845,39 @@ def test_foreshortening_tracks_a_roll_that_the_angle_cannot_see():
 
     # A degenerate mask is unmeasured, not "flat".
     assert board_axes(np.zeros((40, 40), np.uint8)) is None
+
+
+@pytest.mark.parametrize(
+    "series",
+    [
+        pytest.param([float("nan"), 0.0, 45.0, float("nan")], id="nan-padded"),
+        pytest.param([float("nan")] * 4, id="all-nan"),
+        pytest.param([0.0, float("nan"), float("nan")], id="mostly-nan"),
+    ],
+)
+def test_sweep_survives_unmeasurable_frames(series):
+    """An unmeasured frame is NaN, and NaN must not crash the sweep.
+
+    Found by running the v2 extraction: `board_features_from_angles` writes NaN
+    for a frame it could not measure, and that NaN flowed into net_sweep's
+    arithmetic, where it poisoned every sum and finally failed as
+    "cannot convert float NaN to integer" -- thousands of frames from the cause,
+    on most clips. A gap in the data is normal (a third of frames are
+    unmeasurable), so it has to be a supported input, not an exception.
+    """
+    sweep = net_sweep(series)
+    assert np.isfinite(sweep), sweep
+    assert isinstance(sweep, float)
+
+
+def test_board_feature_stream_handles_nan_angles():
+    """The assembled board stream must survive a mostly-unmeasured clip."""
+    filled = np.zeros((6, 5), np.float32)
+    out = board_features_from_angles(filled, [None, None, None, 0.0, None, None], 6)
+    assert out.shape == (6, 5 + 6 + 2)
+    assert np.isfinite(out).all(), "NaN in the feature vector propagates to the LR"
+    # Coverage is reported so a clip with no measurements is visibly empty.
+    assert out[0, -1] == pytest.approx(1 / 6)
 
 
 def test_confusion_matrix_folds_low_support_classes_and_stays_readable():
