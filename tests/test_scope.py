@@ -22,6 +22,7 @@ from skateid.features import (
     active_window,
     body_features,
     board_angle,
+    board_axes,
     board_axis_angle,
     board_corners,
     board_features,
@@ -792,6 +793,57 @@ def test_active_window_finds_the_flip_not_the_drift():
         f"window ends at {end}, past the flip's end at {flip_end}: active_window "
         "selects on total variation and so prefers the slow drift"
     )
+
+
+def _synthetic_board_mask(long_px: float, short_px: float) -> np.ndarray:
+    """A flat rectangular mask with the requested axis lengths."""
+    import cv2
+
+    size = int(max(long_px, short_px)) + 20
+    mask = np.zeros((size, size), np.uint8)
+    centre = size // 2
+    cv2.rectangle(
+        mask,
+        (centre - int(long_px / 2), centre - int(short_px / 2)),
+        (centre + int(long_px / 2), centre + int(short_px / 2)),
+        255,
+        -1,
+    )
+    return mask
+
+
+def test_foreshortening_tracks_a_roll_that_the_angle_cannot_see():
+    """The feature the plan specified and M2 never built (plan section 7.1).
+
+    A kickflip rotates about the board's **long** axis. In the image that
+    *foreshortens* the board -- it gets narrower -- while the long-axis **angle
+    barely changes**. So a model built on the angle alone is nearly blind to the
+    most common trick in the dataset, which is what six rounds of M2 work measured
+    the hard way (plan 12.8-12.15).
+
+    The ratio must fall monotonically as the board rolls edge-on, and it must be
+    self-normalising: a 4:1 board seen broadside is ~0.80, a fully rolled square
+    is 0.50.
+    """
+    broadside = board_axes(_synthetic_board_mask(100, 25))
+    assert abs(broadside["foreshortening"] - 100 / 125) < 0.02
+    assert broadside["aspect"] > 3.5, "a real board is about 4:1"
+
+    ratios = [board_axes(_synthetic_board_mask(100, short))["foreshortening"]
+              for short in (25, 50, 75, 100)]
+    # Monotonic decrease is the property that matters: a dip and recovery is
+    # exactly the shape a kickflip should produce.
+    assert ratios == sorted(ratios, reverse=True), ratios
+    assert ratios[0] - ratios[-1] > 0.25, f"roll produced only {ratios}"
+
+    # Self-normalising: scaling the board must not move the ratio, so the feature
+    # does not depend on camera distance.
+    small = board_axes(_synthetic_board_mask(40, 10))["foreshortening"]
+    large = board_axes(_synthetic_board_mask(400, 100))["foreshortening"]
+    assert abs(small - large) < 1e-6, (small, large)
+
+    # A degenerate mask is unmeasured, not "flat".
+    assert board_axes(np.zeros((40, 40), np.uint8)) is None
 
 
 def test_confusion_matrix_folds_low_support_classes_and_stays_readable():

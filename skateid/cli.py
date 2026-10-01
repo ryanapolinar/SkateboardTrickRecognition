@@ -328,6 +328,8 @@ def oracle_cmd(args) -> int:
 
     rows = []
     for _, record in frame.iterrows():
+        key = features.cache_key(record["clip_id"], features.EXTRACTOR_VERSION)
+
         try:
             batch = sample_frames(record["file_path"], count=args.frames, size=(640, 640))
         except (OSError, ValueError):

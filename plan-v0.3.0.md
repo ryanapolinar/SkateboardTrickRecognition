@@ -275,11 +275,48 @@ Per frame (D ~ 52):
 |---|---|---|
 | Body joints | 34 | 17 x (x,y), centred on hip, / s |
 | Board corners | 8 | 4 x (x,y), same frame |
-| Board rotation | 3 | long-axis angle; **long-axis foreshortening** (long-axis len / baseline); short-axis len |
+| Board rotation | 6 | see the **axis mapping** in §7.1 — angle + foreshortening on **both** board axes |
 | Body yaw | 2 | sin,cos of shoulder-line angle vs clip's first frame |
 | Feet-to-deck | 2 | ankle to nearest-deck-edge distance, per foot |
 | **Airtime** | 2 | ankle height above standing baseline, per foot — **diagnostic, not a head** |
 | Quality | 1 | board-visible fraction |
+
+### 7.1 Board axis mapping (recorded 2026-09-28)
+
+**Which physical axis each trick rotates about is the whole game here, and it was
+never written down anywhere** — not in this plan, not in `tricks.json`, not in any
+code comment. It is domain knowledge, supplied by the project owner. It is recorded
+explicitly now because six rounds of M2 work (§12.8–12.15) failed by measuring the
+wrong axis, and for most of that time the failure looked like a data problem.
+
+Notation: a **Unity-style right-handed frame** — `x` right, `y` up, `z` toward the
+viewer. For a board lying flat, `x` runs tail→nose along the **long axis**, and the
+**short axis** is the deck's width.
+
+| trick | rotates about | what the image shows |
+|---|---|---|
+| **kickflip / heelflip** (`flip` axis) | the board's **long** axis | the board **foreshortens** — it gets *shorter* in the image as it rolls. Its long-axis **angle barely changes** |
+| **shuvit** (`board_spin`) | **y** (vertical / yaw) | the board spins **in the ground plane**, like a wheel rolling sideways. The long-axis angle sweeps the full ±180 |
+| **impossible** | the board's **short** axis | the deck wraps **vertically** around the front foot. This is the axis the 3-axis model lacks, which is why `impossible` is `rotation_expressible: false` in `tricks.json` and appears in **none** of the 671 clips |
+
+**Why the old feature row was wrong, stated precisely.** The pre-2026-09-28 spec
+allocated 3 dims reading "long-axis angle; long-axis foreshortening; short-axis
+len". M2 implemented **only the long-axis angle**. That is blind to *both* major
+trick families: a kickflip rolls about the long axis so its angle barely turns, and
+a shuvit is a yaw, which the long-axis angle reads as almost nothing. The one
+quantity that does track a kickflip is **foreshortening** — specified in the plan
+all along, and never built. That omission is a plain implementation gap, not a
+missing piece of domain knowledge.
+
+Board rotation is now 6 dims, and the two dominant families live on complementary
+signals:
+
+| | long-axis angle | long foreshortening | long len / baseline |
+|---|---|---|---|
+| **kickflip** | near-flat | **strong** | **shrinks** |
+| **shuvit** | **sweeps ±180** | weak | constant |
+
+See §12.16 for the measurement that follows from this.
 
 Sequence: T = 60 frames @ 30 fps (~2 s), always resampled to this length regardless of source
 fps. Cache to `data/cache/<clip_hash>.npz` so training is seconds and reproducible.
@@ -1260,6 +1297,66 @@ part.
 **Code note:** `sample_frames` is still called with 640x640 in the extraction path
 and the cache was built at that size. Any future board work must re-extract at
 854x480, and the pose cache is unaffected (pose does not care about board pixels).
+
+### 12.16 M2 step 4: foreshortening works — the flip IS in the data (2026-09-28)
+
+The plan specified three board-rotation quantities (section 7, pre-2026-09-28):
+"long-axis angle; **long-axis foreshortening**; short-axis len". M2 built the first
+and stopped. **The second is the one that carries a kickflip.** Built now, as
+`features.board_axes()` / `foreshortening_series()`, measuring
+``long_len / (long_len + short_len)`` from the segmented mask.
+
+**Verified on synthetic input first**, because a flat-versus-rolled board is a known
+quantity: a 4:1 board seen broadside reads **0.806**, and rolling toward a square
+reads 0.667 -> 0.543 -> 0.500. Monotonic, and self-normalising (a 40x10 board and a
+400x100 board give identical ratios, so camera distance drops out).
+
+**And on real footage it separates.** 48 samples at native 854x480; "drop" is
+``median - min`` of the series, i.e. how far the board goes edge-on:
+
+| clip | measured | flat median | min (dip) | **drop** |
+|---|---|---|---|---|
+| heelflip A | 42/48 | 0.803 | 0.762 | 0.041 |
+| heelflip B | 45/48 | 0.726 | 0.594 | 0.133 |
+| **fs_360 A** | 44/48 | 0.806 | 0.594 | **0.211** |
+| **fs_360 B** | 43/48 | 0.796 | 0.583 | **0.213** |
+| fs_shuvit A | 41/48 | 0.765 | 0.657 | 0.108 |
+| fs_shuvit B | 35/48 | 0.805 | 0.708 | 0.097 |
+
+The `fs_360` trace shows the shape physics predicts, in full:
+
+```
+0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.81 0.81  . 0.72  . 0.67  .  . 0.65 0.64 0.71 0.79 0.77 0.82 0.79 0.78 0.65 0.59 0.68 0.77 0.78 0.79 0.81 0.81 0.78 0.80
+```
+
+**Flat at 0.83, dipping to 0.59 through the middle of the clip, recovering to
+0.80.** That is a kickflip, measured: the board is seen going edge-on and coming
+back.
+
+**This is the first genuine positive result in M2.** The signal was in the footage
+the whole time; six rounds of work failed because the feature being measured was
+the one quantity a kickflip barely changes. The long-axis angle is genuinely weak
+here (max step 5-55 deg across all traces) and foreshortening is strong (0.21
+drop) — exactly what section 7.1's axis mapping predicts.
+
+**Two honest caveats:**
+
+1. **The magnitude is not calibrated.** 0.21 is a *360-degree* roll; 0.13 and 0.04
+   are ambiguous between a partial roll, a catch, and clip-to-clip variation in
+   trick height. The ordinal separation is real; the absolute value is not yet
+   trustworthy as "number of flips".
+2. **`fs_shuvit` also dips (0.10)**, and per section 7.1 a shuvit is a *yaw*,
+   which should leave foreshortening roughly constant. Either the board tilts
+   during the shuvit, or the mask is picking up something else. **Unresolved.**
+
+**Next, now a small job:** re-extract the board stream at 854x480 with
+foreshortening included, then run `probe --with-board` on the restricted vocabulary
+for the first time — the first measurement in this project that could plausibly
+clear a gate.
+
+**Not claimed:** no M2 result yet. The pose-only ablation (0.0406) is still the only
+measured representation result.
+
 
 
 

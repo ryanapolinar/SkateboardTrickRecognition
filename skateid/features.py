@@ -208,6 +208,72 @@ def unwrap_angles(degrees: List[float]) -> List[float]:
     return out
 
 
+def board_axes(mask_or_corners):
+    """Both board axes as lengths, plus a **foreshortening ratio**.
+
+    This is the feature the plan specified and M2 did not build. A kickflip rolls
+    about the board's **long** axis, so in the image the board *foreshortens* — it
+    gets shorter — while its long-axis **angle barely changes**. Measuring the
+    angle alone is therefore nearly blind to a kickflip (plan 7.1 / 12.15).
+
+    The foreshortening ratio is ``long_len / (long_len + short_len)``: the share of
+    the rectangle's extent taken by the long axis. It approaches 0.5 for a board
+    seen broadside (4:1 -> 0.80) and falls toward 0.29 for a square (1:1). It is
+    self-normalising, so it does not depend on camera distance.
+
+    Returns ``None`` for a degenerate mask, so "not measured" stays distinct from
+    "measured as flat".
+    """
+    import cv2
+
+    array = np.asarray(mask_or_corners)
+    if array.ndim == 2:
+        points = cv2.findNonZero(array.astype(np.uint8))
+        if points is None or len(points) < 4:
+            return None
+        (_, _), (w, h), _ = cv2.minAreaRect(points)
+    else:
+        corners = array.astype(np.float32).reshape(4, 2)
+        edges = [float(np.linalg.norm(corners[(i + 1) % 4] - corners[i])) for i in range(4)]
+        w, h = sorted(edges)[-2:]
+    if w < 2 or h < 2:
+        return None
+
+    long_len, short_len = max(w, h), min(w, h)
+    return {
+        "long_len": long_len,
+        "short_len": short_len,
+        "aspect": long_len / short_len,
+        "foreshortening": long_len / (long_len + short_len),
+    }
+
+
+def foreshortening_series(model, frames, device: int = 0):
+    """Per-frame foreshortening ratio from segmented board masks.
+
+    The signal a kickflip actually produces: a dip toward 0.5 as the deck rolls
+    edge-on, recovering on the catch. ``None`` where the board is not segmented,
+    so a missing measurement is never reported as a flat board.
+    """
+    out = []
+    for frame in frames:
+        result = model.predict(frame, verbose=False, device=device)[0]
+        if result.masks is None or result.boxes is None:
+            out.append(None)
+            continue
+        best, best_conf = None, 0.25
+        for mask, cls, conf in zip(result.masks.data, result.boxes.cls, result.boxes.conf):
+            if model.names[int(cls)] == "skateboard" and float(conf) > best_conf:
+                best, best_conf = mask, float(conf)
+        if best is None:
+            out.append(None)
+            continue
+        binary = (best.cpu().numpy() > 0.5).astype(np.uint8)
+        axes = board_axes(binary)
+        out.append(None if axes is None else float(axes["foreshortening"]))
+    return out
+
+
 def rotation_window(
     angles: List[Optional[float]], min_span: int = 3, max_span: int = 14
 ) -> Optional[Tuple[int, int]]:
