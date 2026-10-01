@@ -1,4 +1,16 @@
 # Skateboard Trick Recognition — Plan v0.3.0 (2026, consolidated)
+> **Project shelved, 2026-10-01.** M0-M3 are complete as *experiments*; none is a
+> shipping product. The summary a newcomer should read is [`README.md`](README.md).
+> This file remains the full lab notebook — every hypothesis, gate revision, dead
+> end and measured number, in the order they happened, including the ones that
+> failed. It is kept intact precisely because the negative results are the most
+> valuable part.
+>
+> Final state in one line: **rider kinematics work** (0.2943 macro-F1, 7.5x a
+> degenerate baseline; 0.709 body-rotation family accuracy); **board rotation does
+> not**, and cannot at this resolution — roll about the long axis is provably
+> silhouette-invariant in 2D (12.25) and yaw sits at its own baseline (12.29).
+
 
 > Single integrated plan. Supersedes the earlier `plan-v0.1` / `v0.2` / `v0.2.1`
 > drafts, which were removed once v0.3.0 absorbed them; they remain in git history
