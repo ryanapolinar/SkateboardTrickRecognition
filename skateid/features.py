@@ -448,27 +448,39 @@ def segmented_angle(model, image, device: int = 0) -> Optional[float]:
 def board_summary(board: np.ndarray) -> np.ndarray:
     """Compress the per-frame board stream to four summary scalars.
 
+    **Read `features.board_features_from_angles` before trusting the docstring.**
+    That writer stores the **long-axis angle in degrees (mod 180)** in column
+    ``5+i``. It does *not* store a foreshortening ratio: ``foreshortening_series``
+    was never wired into ``extract_clip``, so the v2 cache carries angles only
+    (plan 12.25). Everything below therefore describes an *angle* series, and the
+    "foreshortening" naming in earlier plan entries does not match the bytes on
+    disk. Verified: a kickflip clip yields a peak of 33.98 here, where a
+    foreshortening ratio is bounded to [0, 1].
+
     The 2640-dim board stream *lowered* holdout macro-F1 from 0.2048 to 0.1476
     (plan 12.17) -- not because the board carries no information, but because
     2448 pose dims already outnumber 110 training rows, so extra noisy columns
     cost more variance than they add. The fix is fewer, better numbers.
 
-    1. **dip depth** -- ``median - min`` of the foreshortening series. This is the
-       quantity plan 12.16 actually demonstrated on real clips (a flat board at
-       0.83 dipping to 0.59 through a kickflip), and the one ``net_sweep`` failed
-       to capture: kick-family and all other classes share a mean net_sweep of
-       -1.15/-1.14, because sweep is an accumulated-path measure rather than an
-       amplitude.
-    2. **dip timing** -- where in the clip the dip sits, as a fraction. Tricks
-       happen mid-clip, so a board dipping at frame 5 of 48 is something else.
+    1. **peak amplitude** -- ``max - median`` of the series, i.e. how far the board
+       swings from its resting reading.
+    2. **peak timing** -- where in the clip the peak sits, as a fraction. Tricks
+       happen mid-clip, so a swing at frame 5 of 48 is something else.
     3. **coverage** -- fraction of frames where the board was measurable, so a
        clip with no detections is visibly empty rather than looking like a board
        that never moved.
-    4. **peak foreshortening** -- the maximum, so amplitude is available on both
-       sides rather than only as a dip.
+    4. **range** -- ``max - min`` over the series.
 
-    Angles are deliberately excluded: near-blind to a kickflip (plan 7.1), and the
-    bulk of the harmful dimensionality.
+    **Polarity note (plan 12.25).** This used to be ``median - min``, described as
+    a "dip". That is the wrong polarity for a *foreshortening* ratio, because a
+    deck rolling edge-on narrows and the ratio ``long/(long+short)`` **rises**
+    toward 1.0. The reading kept here is ``max - median`` so it is correct once a
+    real foreshortening column exists; on angle data it is the analogous
+    "furthest from the resting angle".
+
+    Angles alone are still near-blind to a kickflip's *sign* (plan 7.1 / 12.25):
+    a silhouette is invariant under a roll about its own long axis, so kick-vs-heel
+    needs the board's **face** (grip tape vs. graphic), not its outline.
     """
     # The angle/foreshortening series is the (frames, frames) block starting at
     # column 5: column 5+i is frame i's angle. Indexed [i, 5+i]. Slicing rows
@@ -486,10 +498,10 @@ def board_summary(board: np.ndarray) -> np.ndarray:
         return np.zeros(4, dtype=np.float32)
     return np.array(
         [
-            float(np.median(usable) - usable.min()),
-            float(usable.argmin()) / max(len(usable) - 1, 1),
+            float(np.max(usable) - np.median(usable)),
+            float(usable.argmax()) / max(len(usable) - 1, 1),
             float(usable.size) / max(board.shape[0], 1),
-            float(usable.max()),
+            float(np.max(usable) - np.min(usable)),
         ],
         dtype=np.float32,
     )

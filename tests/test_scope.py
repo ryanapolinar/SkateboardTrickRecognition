@@ -1,4 +1,4 @@
-﻿"""Tests for data validation, allowlist enforcement, and scope guardrails."""
+"""Tests for data validation, allowlist enforcement, and scope guardrails."""
 
 import json
 import tempfile
@@ -882,7 +882,7 @@ def test_board_feature_stream_handles_nan_angles():
     assert out[0, -1] == pytest.approx(1 / 6)
 
 
-def test_board_summary_compresses_to_four_scalars_and_keeps_the_dip():
+def test_board_summary_compresses_to_four_scalars_and_keeps_the_peak():
     """The board stream must shrink to a handful of scalars to be usable.
 
     The full 2640-dim stream measurably *lowered* holdout macro-F1 (0.2048 ->
@@ -890,28 +890,29 @@ def test_board_summary_compresses_to_four_scalars_and_keeps_the_dip():
     rows. So the compression is not cosmetic -- it is what makes the board stream
     usable at all.
 
-    The quantity preserved is **dip depth**, which is what plan 12.16 actually
-    demonstrated on real clips. `net_sweep` does not survive: it is an
-    accumulated-path measure and gave identical means for kick-family and all
-    other classes (-1.15 / -1.14).
+    **Polarity corrected in plan 12.25.** This previously preserved a "dip"
+    (``median - min``) on the assumption that column 5+i held a foreshortening
+    ratio that falls edge-on. Both halves of that were wrong: the column holds an
+    ANGLE in degrees, and a narrowing deck makes ``long/(long+short)`` RISE toward
+    1.0. The amplitude is therefore ``max - median``, measured here as a peak.
     """
     frames = 48
-    # A flat board that dips mid-clip, the shape a kickflip produces. Column 5+i
-    # holds frame i's foreshortening.
-    flat = np.full(frames, 0.83, dtype=np.float32)
-    flat[22:26] = 0.59
+    # A board that swings mid-clip, peaking where a flip occurs. Column 5+i holds
+    # frame i's long-axis angle in degrees.
+    series = np.full(frames, 0.83, dtype=np.float32)
+    series[22:26] = 1.07
     board = np.zeros((frames, 55), dtype=np.float32)
     for i in range(frames):
-        board[i, 5 + i] = flat[i]
+        board[i, 5 + i] = series[i]
     summary = board_summary(board)
 
     assert summary.shape == (4,)
-    assert summary[0] == pytest.approx(0.83 - 0.59, abs=0.01), "dip depth"
-    assert 0.4 < summary[1] < 0.6, f"dip should be mid-clip, got {summary[1]}"
+    assert summary[0] == pytest.approx(1.07 - 0.83, abs=0.01), "peak amplitude"
+    assert 0.4 < summary[1] < 0.6, f"peak should be mid-clip, got {summary[1]}"
     assert summary[2] == pytest.approx(1.0), "all frames measured"
-    assert summary[3] == pytest.approx(0.83, abs=0.01), "peak foreshortening"
+    assert summary[3] == pytest.approx(1.07 - 0.83, abs=0.01), "range"
 
-    # A flat board with no dip has (near) zero depth -- so dip is a real
+    # A board that never swings has zero amplitude, so this is a real
     # discriminator and not an artefact of every clip having some variance.
     quiet = np.zeros((frames, 55), dtype=np.float32)
     for i in range(frames):
@@ -1379,3 +1380,78 @@ def test_class_probs_binary_and_multiclass_agree_with_predict_proba():
             raw = model.coef_ @ row + model.intercept_
             ours = _class_probs(raw, list(model.classes_))
             assert np.allclose(ours, model.predict_proba(row.reshape(1, -1))[0])
+
+
+def _rolled_board(roll_deg, L=120, W=28):
+    """Silhouette of a deck rolled about its OWN long axis (a kickflip).
+
+    Roll narrows the projected short axis; the outline is otherwise unchanged.
+    """
+    import cv2
+    img = np.zeros((220, 260), np.uint8)
+    w = max(W * abs(np.cos(np.radians(roll_deg))), 1.0)
+    cv2.rectangle(img, (70, int(110 - w / 2)), (70 + L, int(110 + w / 2)), 255, -1)
+    return img
+
+
+def test_silhouette_cannot_recover_kick_vs_heel():
+    """The M2 root cause: a board's OUTLINE is invariant to its roll sign.
+
+    A kickflip and a heelflip are the same deck rolled +360 and -360 about the
+    long axis. Neither the long-axis angle nor the foreshortening ratio can tell
+    them apart -- verified exactly, not approximately. Any extractor built on the
+    silhouette alone is measuring something that provably cannot carry the sign,
+    which is why plan 12.8-12.16 kept failing no matter how segmentation improved.
+    """
+    from skateid.features import board_axes, board_axis_angle
+    rolls = [sign * 300.0 * f / 47.0 for f in range(48) for sign in (1, -1)]
+    kick = [_rolled_board(r) for r in rolls[0::2]]
+    heel = [_rolled_board(r) for r in rolls[1::2]]
+    for a, b in zip(kick, heel):
+        ax, bx = board_axes(a), board_axes(b)
+        # Both frames are the same deck at the same roll magnitude, so either both
+        # measure or both are degenerate (edge-on). Either way they agree.
+        assert (ax is None) == (bx is None)
+        if ax is not None:
+            assert np.isclose(ax["foreshortening"], bx["foreshortening"])
+            assert np.isclose(board_axis_angle(a), board_axis_angle(b))
+        assert (board_axis_angle(a) is None) == (board_axis_angle(b) is None)
+
+
+def test_foreshortening_rises_not_dips_while_rolling_edge_on():
+    """Polarity: a narrowing deck makes long/(long+short) RISE toward 1.0.
+
+    This is why board_summary's old `median - min` "dip depth" was the wrong
+    polarity, and the fix only matters once a real foreshortening column exists.
+    """
+    from skateid.features import board_axes
+    ratios = [board_axes(_rolled_board(r))["foreshortening"] for r in (0, 30, 60, 80)]
+    assert ratios == sorted(ratios), f"expected a monotone rise, got {ratios}"
+    assert ratios[-1] > ratios[0]
+
+
+def test_board_summary_reads_the_series_it_is_actually_given():
+    """board_summary is an ANGLE summary; the cache holds degrees, not ratios.
+
+    Regression guard for plan 12.25: an earlier version documented column 5+i as
+    a foreshortening ratio and computed a "dip" from it, but
+    board_features_from_angles writes the long-axis angle in degrees there. The
+    peak of 33.98 below is impossible for a ratio bounded to [0, 1], which is how
+    the mismatch was found.
+    """
+    from skateid.features import board_features_from_angles, board_summary
+    frames = 8
+    angles = [None, 10.0, 30.0, 34.0, 30.0, 10.0, None, 0.0]
+    board = board_features_from_angles(np.zeros((frames, 5), np.float32), angles, frames)
+    summary = board_summary(board)
+    assert summary.shape == (4,)
+    # Amplitude is max - median, timing is the argmax fraction, and an unmeasured
+    # frame must not count toward coverage.
+    # The writer stores an unmeasurable frame as NaN but then replaces NaN with 0
+    # so the scaler cannot be poisoned; coverage (summary[2]) is what says how much
+    # was real. So the summary is computed over the ZERO-SUBSTITUTED series.
+    finite = np.nan_to_num(np.array([np.nan if a is None else a for a in angles], float))
+    assert np.isclose(summary[0], float(np.max(finite) - np.median(finite)))
+    assert np.isclose(summary[1], int(np.argmax(finite)) / (len(finite) - 1))
+    assert np.isclose(summary[2], len(finite) / frames)
+    assert np.isclose(summary[3], max(finite) - min(finite))

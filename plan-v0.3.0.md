@@ -1513,7 +1513,84 @@ board feature for classification. **Recommendation: stop pushing M2**, take the
 pose-only result as M1/M2's outcome, and do not build a temporal model inside a
 milestone that has already run long.
 
-### 12.24 Option 3: per-axis classification. Name accuracy 0.068 -> 0.126 (2026-09-28)
+### 12.25 M2 revived: the "foreshortening" feature was never in the data (2026-10-01)
+
+Revived M2 to test the belief that board-axis measurement was merely unfinished.
+**It is not unfinished — it is measuring the wrong thing, and the plan's own
+headline M2 result rests on a column that does not exist.**
+
+#### Bug 1 (root cause): `board_summary` reads an angle and calls it foreshortening
+
+`board_features_from_angles` (features.py:842) writes, per frame, the **long-axis
+angle in degrees, mod 180**. `board_summary` (features.py:448) reads column `5+i`,
+labels it "the foreshortening series", and computes `median - min` as "dip depth".
+
+**There is no foreshortening column in the cached stream.** `foreshortening_series`
+exists as a function but was never wired into `extract_clip`, so the v2 cache
+carries angles only. Verified on a real kickflip clip:
+
+```
+sbml_kickflip0_v2  column 5+i: [0, 0, 0, 0, 33.98, 20.39, 0, ...]   range 0 .. 33.98
+board_summary()  ->  [0.0, 0.0, 1.0, 33.9765]
+```
+
+A "dip depth" of **33.98** where a foreshortening ratio is mathematically bounded
+to [0, 1]. So the four scalars that §12.18 reported as "it stops hurting, but does
+not help" are, on the real cache, **angle statistics mislabelled as shape
+statistics** — and §12.16's celebrated "flat 0.83, dipping to 0.59, recovering to
+0.80, a kickflip measured" was read off a live probe, not the cache, so it never
+survived into training data.
+
+#### Bug 2: the polarity is backwards even on real foreshortening
+
+`median - min` measures a **dip**. A deck rolling edge-on *narrows*, so
+`long/(long+short)` **rises** toward 1.0 as the board turns. On a synthetic roll:
+
+```
+roll    0      30     60      90
+ratio   0.811  0.828  0.896   -> 1.0
+```
+
+So the correct amplitude is `max - median` (a **peak**), not `median - min`. On the
+current cache both read the same angle series, which is why the two are
+numerically identical (kickflip 84.18 / heelflip 81.06) — the fix only pays off once
+the real column exists.
+
+#### The finding that reframes M2 entirely
+
+On a synthetic deck rolled **+360 vs -360**, both measurements are **exactly
+identical** — foreshortening AND long-axis angle, `allclose = True`:
+
+```
+foreshortening: min 0.8108 vs 0.8108   IDENTICAL
+long-axis angle: min 0.0000 vs 0.0000  IDENTICAL
+```
+
+This is not a tuning failure, it is **geometry**. A board silhouette is invariant
+under a roll about its own long axis; and `board_axis_angle` is mod 180 by
+construction, which the code says outright ("a rectangle has no facing"). **No
+silhouette-only extractor can ever recover kick-vs-heel.** The oracle's 5 % kick /
+50 % heel (§12.8) was measuring a feature that *provably cannot encode the answer*,
+which is why no amount of segmentation work moved it (§12.9–12.16). The whole
+sequence of M2 experiments was re-judging segmentation on an impossible target.
+
+**Consequence for the 12.24 result.** `flip` scoring at/below its dummy baseline is
+**exactly what this predicts** — not a modelling failure. The sign needs the board's
+*face*: grip tape vs. graphic side, i.e. **appearance, not silhouette**.
+
+**Correct M2 scope, in priority order:**
+1. Wire `foreshortening_series` into `extract_clip` so the column exists (fixes
+   Bug 1; gives an honest amplitude feature).
+2. Fix polarity to `max - median` (Bug 2).
+3. **Only then** look for the sign, and it must come from appearance — e.g. the
+   board's mask *interior* contrast along the long axis (grip tape is dark and
+   matte, the graphic side is bright and glossy), not from its outline. The
+   synthetic mirror test in §12.8 is the right harness: it must be rebuilt to vary
+   *face*, since varying roll alone can never separate the two.
+
+**Not claimed:** no M2 gate result, and no flip-axis improvement. Nothing above has
+been measured on real clips yet. Suite: 63 passed, 1 xfailed (unchanged).
+
 
 Replaced the shrinking regressors' role in naming with **per-axis integer-level
 classifiers** (`predict_levels`, `rotations_from_levels`, `level_confidence`).
