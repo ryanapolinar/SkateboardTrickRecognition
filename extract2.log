@@ -1,1 +1,5 @@
 extracting 671 clips on cuda
+extracted 671/671 in 1888s (2.81s/clip)
+keypoint fill: mean 0.763, min 0.000
+usable clips (>=50% frames with >=50% keypoints): 595/671
+wrote quality report to data/feature_quality.csv
