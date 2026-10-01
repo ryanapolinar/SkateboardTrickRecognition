@@ -294,6 +294,200 @@ def foreshortening_series(model, frames, device: int = 0):
     return out
 
 
+#: Minimum interior pixels before a mask can be split into two faces. A board is
+#: ~118x27 px (plan 12.26), so this rejects specks rather than real boards.
+FACE_MIN_PIXELS = 120
+#: Minimum dark->bright centroid separation (px) for a frame to yield a sign.
+FACE_MIN_OFFSET_PX = 1.5
+#: Minimum separation (gray levels) between the two faces for a frame to be trusted.
+FACE_MIN_CONTRAST = 12.0
+#: A board whose darkest interior pixel is at least this bright has no dark face at
+#: all -- the dark-graphic-deck blind spot. This is a **floor on absolute
+#: darkness**, not the same quantity as FACE_MIN_CONTRAST above: overloading one
+#: constant for both rejected every real board, because grip tape sits around gray
+#: 46 and a 12 threshold is nowhere near "this board is not dark".
+FACE_DARK_FLOOR_MAX = 100.0
+#: Tolerance band around that percentile that still counts as "the dark face".
+FACE_DARK_TOLERANCE = 6.0
+
+
+def face_contrast(mask: np.ndarray, frame: Optional[np.ndarray] = None) -> Optional[dict]:
+    """Split the board's interior by which face is toward the camera.
+
+    **This is the first feature that can carry a flip's sign** (plan 12.25/12.26).
+    A board's *silhouette* is provably invariant under a roll about its own long
+    axis, so no outline measurement -- angle, foreshortening, aspect -- can tell a
+    kickflip from a heelflip. The two differ only in **which face is showing**:
+    black grip tape versus a usually-coloured graphic. So this measures pixel
+    appearance *inside* the mask, not the outline.
+
+    **How it works.** The centroid of the board's darkest pixels is compared
+    against the centroid of its brightest pixels. When grip tape faces the camera
+    the dark centroid sits near the mask centroid and the bright one is pushed
+    aside (the visible sliver of graphic); when the graphic faces the camera the
+    reverse. The returned ``signed`` value is that dark->bright displacement
+    projected onto the board's long axis, so its **sign flips between a kickflip
+    and a heelflip** -- exactly the quantity outline features cannot provide.
+
+    Three deliberate normalisations, each of which would otherwise make this
+    unusable rather than merely noisy:
+
+    - **Per-frame luminance normalisation.** Contrast is relative to the board's
+      own median luminance, so a global lighting change cancels (the same property
+      that makes foreshortening camera-distance invariant, 12.16).
+    - **Asymmetry, not brightness.** Absolute luminance is meaningless; only the
+      *spatial split* between the two faces is used.
+    - **Reported with coverage.** A dark-graphic board with black grip tape has no
+      internal contrast. ``separable`` is ``False`` and the caller is expected to
+      abstain rather than guess -- a genuine blind spot, documented in 12.26.
+
+    Returns ``None`` when the mask is too small to split, keeping "not measurable"
+    distinct from "measured as no contrast".
+    """
+    import cv2
+
+    mask = np.asarray(mask)
+    if mask.ndim != 2 or not mask.any():
+        return None
+    ys, xs = np.nonzero(mask)
+    if ys.size < FACE_MIN_PIXELS:
+        return None
+
+    # The long axis is the direction the deck points, and the sign is read along
+    # it, so the frame must follow the board rather than the image. ``minAreaRect``
+    # reports the angle of whichever side it calls "width", which is the SHORT
+    # side roughly half the time -- a board lying horizontally comes back as
+    # angle=-90, and projecting onto that vector reads the short axis and yields a
+    # signed value of 0 for every clip. Normalising through the long axis (as
+    # ``board_axis_angle`` already does for the same reason) is what makes the
+    # projection meaningful.
+    points = np.stack([xs, ys], axis=1).astype(np.float32)
+    (_, _), (rect_w, rect_h), rect_angle = cv2.minAreaRect(points)
+    if rect_w < rect_h:
+        rect_angle += 90.0
+    rect_angle = float((rect_angle + 90.0) % 180.0 - 90.0)
+    long_axis = np.array([np.cos(np.radians(rect_angle)), np.sin(np.radians(rect_angle))])
+
+    # Mask boundary pixels are anti-aliased against the background and would bias
+    # a luminance split, so the interior is eroded away first.
+    interior = cv2.erode(mask.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1)
+    if interior.sum() < FACE_MIN_PIXELS:
+        return None
+    iy, ix = np.nonzero(interior)
+    if frame is None:
+        return None
+
+    luma = cv2.cvtColor(np.asarray(frame), cv2.COLOR_BGR2GRAY).astype(np.float64)
+    if luma.shape[0] < mask.shape[0] or luma.shape[1] < mask.shape[1]:
+        luma = cv2.resize(luma, (mask.shape[1], mask.shape[0]))
+    values = luma[iy, ix]
+    if not np.isfinite(values).all() or values.size < FACE_MIN_PIXELS:
+        return None
+
+    # **Split by a median threshold, not by percentiles.** An earlier version
+    # measured the 10-90 spread and reported 0 on a deck that plainly had a bright
+    # graphic next to dark grip: the graphic is a small sliver of the board, so it
+    # sits below the 90th percentile and a percentile range cannot see it.
+    #
+    # A plain median split also fails, in the opposite direction and worse: when
+    # the *graphic* is the majority face (which is most of the time -- a deck
+    # showing its bottom is nearly all graphic), the median lands in the graphic,
+    # the bright group is empty, and the measurement returns ``None``. That does
+    # not abstain, it **discards the sign** on the majority of frames.
+    #
+    # So the split is anchored on the board's DARKEST face -- grip tape is the
+    # reliably dark one, which is what makes it the natural reference.
+    #
+    # The anchor must be the darkest face that is a **substantial** part of the
+    # board, not a fixed low percentile. With a grip sliver covering ~10 % of the
+    # deck, the 20th percentile lands *inside the graphic* (95), the "dark" group
+    # then swallows the whole board and the bright group is empty -- measured on
+    # the synthetic mirror pair, which is how this was caught. Taking the darkest
+    # value present and growing the dark group from there finds grip tape however
+    # little of it is visible, and leaves the graphic as the rest.
+    floor = float(values.min())
+    if floor >= FACE_DARK_FLOOR_MAX:
+        # No dark face anywhere: a uniformly mid-tone board (the documented
+        # blind spot). Say so rather than manufacturing a split.
+        return None
+    low = values <= floor + FACE_DARK_TOLERANCE
+    if low.sum() < FACE_MIN_PIXELS // 4:
+        # A handful of stray dark pixels (a shadow, a wheel) is not a face.
+        return None
+    high = ~low
+    if high.sum() < FACE_MIN_PIXELS // 4:
+        return None
+
+    coords = np.stack([ix, iy], axis=1).astype(np.float64)
+    dark_centroid = coords[low].mean(axis=0)
+    bright_centroid = coords[high].mean(axis=0)
+    # How dark the dark face actually is vs. the rest. This is the two-face
+    # separation, and it is what says whether the board has two distinguishable
+    # faces at all (a dark-graphic deck does not).
+    separation = float(values[high].mean() - values[low].mean())
+
+    # Non-zero means the two faces are spatially separated, which is the whole cue.
+    displacement = bright_centroid - dark_centroid
+    signed = float(np.dot(displacement, long_axis))
+    magnitude = float(np.linalg.norm(displacement))
+
+    separable = bool(magnitude >= FACE_MIN_OFFSET_PX and separation >= FACE_MIN_CONTRAST)
+
+    return {
+        "signed": signed,
+        "magnitude": magnitude,
+        "contrast": separation,
+        "separable": separable,
+        "interior_pixels": int(interior.sum()),
+    }
+
+
+def face_contrast_series(model, frames, device: int = 0) -> List[Optional[dict]]:
+    """Per-frame :func:`face_contrast`, ``None`` where the board was not measurable."""
+    out: List[Optional[dict]] = []
+    for frame in frames:
+        result = model.predict(frame, verbose=False, device=device)[0]
+        if result.masks is None or result.boxes is None:
+            out.append(None)
+            continue
+        best, best_conf = None, BOARD_MIN_CONF
+        for mask, cls, conf in zip(result.masks.data, result.boxes.cls, result.boxes.conf):
+            if model.names[int(cls)] == BOARD_COCO_CLASS and float(conf) > best_conf:
+                best, best_conf = mask, float(conf)
+        if best is None:
+            out.append(None)
+            continue
+        binary = (best.cpu().numpy() > 0.5).astype(np.uint8)
+        out.append(face_contrast(binary, frame))
+    return out
+
+
+def face_contrast_summary(series: List[Optional[dict]]) -> Dict[str, float]:
+    """Collapse a face-contrast series to the numbers a probe reports.
+
+    Reports **coverage and peak separately** on purpose. A single "how much did the
+    sign swing" number looks identical whether the board was legible on 40 frames
+    or 2, and 12.8-12.16 is a record of what that hides. The peak is signed (it is
+    the reading at the most-separated frame, so its sign is the flip's sign);
+    ``coverage`` is what tells a caller whether to trust it.
+    """
+    usable = [entry for entry in series if entry is not None]
+    separable = [entry for entry in usable if entry["separable"]]
+    if not separable:
+        return {"peak_signed": 0.0, "peak_magnitude": 0.0, "mean_contrast": 0.0,
+                "coverage": 0.0, "separable_coverage": 0.0, "sign": 0.0}
+    peak = max(separable, key=lambda entry: entry["magnitude"])
+    return {
+        "peak_signed": float(peak["signed"]),
+        "peak_magnitude": float(peak["magnitude"]),
+        "mean_contrast": float(np.mean([entry["contrast"] for entry in separable])),
+        "coverage": len(usable) / max(len(series), 1),
+        "separable_coverage": len(separable) / max(len(series), 1),
+        # +1 / -1 rather than the raw value, so callers threshold on direction.
+        "sign": float(np.sign(peak["signed"])),
+    }
+
+
 def rotation_window(
     angles: List[Optional[float]], min_span: int = 3, max_span: int = 14
 ) -> Optional[Tuple[int, int]]:

@@ -1455,3 +1455,108 @@ def test_board_summary_reads_the_series_it_is_actually_given():
     assert np.isclose(summary[1], int(np.argmax(finite)) / (len(finite) - 1))
     assert np.isclose(summary[2], len(finite) / frames)
     assert np.isclose(summary[3], max(finite) - min(finite))
+
+
+def _two_tone_deck(sign, sliver=14, length=140, width=40):
+    """Mirror-symmetric synthetic deck: grip-dominant with a bright graphic sliver
+    at ONE END, so +1 puts the sliver at low x and -1 at high x.
+
+    A correct mirror matters -- an earlier version of this test overwrote the
+    sliver in one branch, so both arms of the "mirror pair" were the same picture
+    and the sign correctly failed to flip. The harness was wrong, not the feature.
+    """
+    import cv2
+    frame = np.zeros((240, 320, 3), np.uint8)
+    mask = np.zeros((240, 320), np.uint8)
+    top, left = 120 - width // 2, 90
+    mask[top:top + width, left:left + length] = 1
+    frame[top:top + width, left:left + length] = (45, 45, 50)      # grip tape, dark
+    if sign > 0:
+        frame[top:top + width, left:left + sliver] = (210, 80, 80)  # graphic sliver
+    else:
+        frame[top:top + width, left + length - sliver:left + length] = (210, 80, 80)
+    return frame, mask
+
+
+def test_face_contrast_recovers_a_flip_sign_that_the_silhouette_cannot():
+    """The point of the whole exercise: this feature's sign flips on a mirror pair.
+
+    Every outline measurement is invariant to the roll (see the silhouette test), so
+    a pair of decks differing only in which face shows must produce opposite signs
+    here. If this fails, the appearance cue does not work and the sign is not
+    learnable from the board at this resolution.
+    """
+    from skateid.features import face_contrast
+    kick_frame, kick_mask = _two_tone_deck(+1)
+    heel_frame, heel_mask = _two_tone_deck(-1)
+    kick = face_contrast(kick_mask, frame=kick_frame)
+    heel = face_contrast(heel_mask, frame=heel_frame)
+    assert kick is not None and heel is not None
+    assert kick["separable"] and heel["separable"]
+    assert (kick["signed"] > 0) != (heel["signed"] > 0), (
+        f"mirror pair did not separate: {kick['signed']:+.2f} vs {heel['signed']:+.2f}"
+    )
+    # Magnitudes should match, since only the direction differs.
+    assert kick["magnitude"] == pytest.approx(heel["magnitude"], rel=0.05)
+
+
+def test_face_contrast_sign_is_invariant_to_in_plane_rotation():
+    """Turning the board in the image must NOT change the sign.
+
+    The sign is a property of which face is showing, not of where the deck points,
+    so this pins that the projection follows the board's own axis.
+    """
+    import cv2
+    from skateid.features import face_contrast
+    for degrees in (0.0, 25.0, -40.0):
+        frame = np.zeros((240, 320, 3), np.uint8)
+        mask = np.zeros((240, 320), np.uint8)
+        rad = np.radians(degrees)
+        centre, half = np.array([160.0, 120.0]), 70.0
+        for t in np.linspace(-1.0, 1.0, 500):
+            offset = np.array([half * t * np.cos(rad), half * t * np.sin(rad)])
+            point = (centre + offset).astype(int)
+            cv2.circle(frame, tuple(point), 19, (45, 45, 50), -1)
+            cv2.circle(mask, tuple(point), 19, 255, -1)
+        # Graphic sliver at the same end of the deck in all three frames.
+        tip = (centre - np.array([half * np.cos(rad), half * np.sin(rad)])).astype(int)
+        cv2.circle(frame, tuple(tip), 19, (210, 80, 80), -1)
+        result = face_contrast(mask, frame=frame)
+        assert result is not None, f"unmeasurable at {degrees} deg"
+        assert result["signed"] < 0, f"sign flipped under in-plane rotation at {degrees} deg"
+
+
+def test_face_contrast_abstains_on_a_uniformly_bright_board():
+    """A pale, uniform deck has no two distinguishable faces, so it must not guess.
+
+    This is the documented blind spot of the approach (plan 12.26): a dark-graphic
+    board is genuinely unmeasurable, and returning a confident sign there would be
+    worse than returning nothing.
+    """
+    import cv2
+    from skateid.features import face_contrast
+    frame = np.zeros((240, 320, 3), np.uint8)
+    mask = np.zeros((240, 320), np.uint8)
+    mask[100:140, 90:230] = 1
+    frame[100:140, 90:230] = (150, 148, 145)
+    result = face_contrast(mask, frame=frame)
+    assert result is None or not result["separable"]
+
+
+def test_face_contrast_summary_reports_coverage_alongside_the_peak():
+    """Coverage must be reported separately from amplitude.
+
+    A single "how far did the sign swing" number looks the same whether the board
+    was legible on 40 frames or 2, which is what 12.8-12.16 measured by mistake.
+    """
+    from skateid.features import face_contrast_summary
+    good = {"signed": 3.0, "magnitude": 3.0, "contrast": 40.0, "separable": True}
+    weak = {"signed": 0.1, "magnitude": 0.1, "contrast": 2.0, "separable": False}
+    series = [good] * 4 + [weak] + [None] * 5
+    summary = face_contrast_summary(series)
+    assert summary["separable_coverage"] == pytest.approx(4 / 10)
+    assert summary["coverage"] == pytest.approx(5 / 10)
+    assert summary["peak_magnitude"] == pytest.approx(3.0)
+    assert summary["sign"] == 1.0
+    empty = face_contrast_summary([None, None])
+    assert empty["sign"] == 0.0 and empty["separable_coverage"] == 0.0

@@ -1513,7 +1513,195 @@ board feature for classification. **Recommendation: stop pushing M2**, take the
 pose-only result as M1/M2's outcome, and do not build a temporal model inside a
 milestone that has already run long.
 
-### 12.25 M2 revived: the "foreshortening" feature was never in the data (2026-10-01)
+### 12.27 The face-contrast probe: built, verified on synthetic, FAILS on real footage (2026-10-01)
+
+Built `features.face_contrast` / `face_contrast_series` / `face_contrast_summary`
+per 12.26. The feature splits the board's **interior** into a dark group (grip tape)
+and a bright group (graphic), and returns the dark->bright centroid displacement
+projected onto the board's long axis — a value whose **sign flips** between a
+kickflip and a heelflip.
+
+#### It works on synthetic input, which is the point
+
+A mirror-symmetric deck (grip-dominant, bright graphic sliver at one end):
+
+```
+kickflip    signed  -69.00   separable=True   two-face separation 49
+heelflip    signed  +69.00   separable=True   two-face separation 49
+SIGN FLIPS between the mirror pair: True
+```
+
+Also verified: the sign is **invariant to in-plane rotation** (0°, +25°, −40° all
+give the same sign), and a uniformly pale deck correctly refuses to guess.
+
+**So the mechanism is sound and 12.26's geometry argument holds: this quantity
+really does carry a sign that no outline feature can.** The synthetic harness is
+exactly the one 12.25 said had to be built, and it passes.
+
+#### Three bugs the synthetic harness caught, all of them mine
+
+Building the probe properly surfaced three defects that a review would not have:
+
+1. **Percentile-based contrast reported 0 on a deck that plainly had two faces.**
+   The graphic is a *minority* of the board, so it sits below the 10–90 spread and
+   a percentile range cannot see it. Splitting on a median then failed the other
+   way: when the graphic is the **majority** (which is most of the time) the median
+   lands inside it, the bright group is empty, and the function returned `None` —
+   discarding the sign on most frames rather than abstaining honestly.
+2. **`minAreaRect`'s angle is the SHORT axis about half the time.** A horizontal
+   deck returns `angle=-90`, so projecting onto it read the wrong axis and returned
+   `signed = 0.00` for every clip. Fixed by normalising through the long axis, the
+   same correction `board_axis_angle` already documents.
+3. **One constant doing two jobs.** `FACE_MIN_CONTRAST` was used both as the
+   two-face separation threshold *and* as an absolute "is this board dark" floor.
+   With the value 12, that rejected **every** real board, because grip tape sits
+   around gray 46. Split into `FACE_MIN_CONTRAST` (12, separation) and
+   `FACE_DARK_FLOOR_MAX` (100, absolute darkness).
+
+**A fourth was in the test, not the code:** the first "mirror pair" overwrote the
+sliver in one branch, so both arms were the same picture and the sign correctly
+failed to flip. The harness was wrong. Worth recording because the failure mode —
+a test that is accidentally not a mirror pair — looks exactly like a broken feature.
+
+#### On real footage it does not separate kickflip from heelflip
+
+14 clips per class, native 854x480, 48 frames, YOLO-seg masks:
+
+| class | n | sign + | sign − | sign 0 |
+|---|---|---|---|---|
+| kickflip | 14 | 8 | 6 | 0 |
+| heelflip | 14 | 5 | 9 | 0 |
+| tre_flip | 14 | 5 | 9 | 0 |
+
+**Mirror separation (the only question that matters):**
+
+| pair | same sign | verdict |
+|---|---|---|
+| kickflip vs heelflip | **0.36** | **below the 0.50 coin-flip baseline** |
+| kickflip vs tre_flip | 0.36 | also unrelated |
+
+Mean separable coverage is 0.30–0.41 and mean two-face contrast ~38 gray levels, so
+the measurement is *firing* — it is not abstaining or erroring, it is reading a
+real asymmetry and that asymmetry **does not track the flip**.
+
+**Reading this honestly.** The feature is not broken; it is uninformative *here*.
+The most likely reason is the one 12.26 predicted and this confirms is fatal at
+this scale: on a 118x27 px board with the rider's feet on the deck, the interior
+pixels are dominated by **trucks, wheels, rider shadow, and motion blur** — and
+those are dark, so the "dark group" is not reliably grip tape. Separating it would
+need face identity at a resolution the footage does not provide, which is the same
+wall as 12.13's data-per-class limit wearing a different hat.
+
+**Consequence: this direction is closed, and it should be closed rather than
+tuned.** Agreement of 0.36 is *below* chance, so no threshold or variant of this
+statistic will rescue it — and per 12.26, the trucks fallback was already
+predicted to be worse (they are the same dark pixels, less reliably localised, and
+carry only an up/down cue rather than a sign).
+
+**What this establishes, which is worth more than the feature:**
+- The sign is **not recoverable from the board's appearance at 854x480** with a
+  segmentation mask. That is now a measured claim, not a guess.
+- Combined with 12.25 (silhouette is provably sign-invariant), **both routes to the
+  flip sign are closed at this resolution.** Pose cannot see it (M1/12.19), the
+  outline cannot encode it (12.25), the interior does not carry it (this section).
+- So `flip` sign is a **data/resolution limitation, not a modelling one** — and
+  the honest options are (a) higher-resolution or per-frame board crops through a
+  dedicated board model, (b) more clips, or (c) accepting that mirror pairs
+  (kickflip/heelflip) cannot be told apart and treating them as **one class**.
+
+**Option (c) is the one this project should probably take**, and it is not a
+failure: "kickflip or heelflip, and here is the sign we cannot determine" is a
+truthful answer a skater would accept, whereas a 7 %-accurate confident label is
+not. It also roughly doubles the data per class, which is the binding constraint
+everywhere else in this project.
+
+**Not claimed:** no M2 gate result and no change to any published number. 75 → 79
+tests pass; the four new ones cover sign recovery, rotation invariance, honest
+abstention on a pale board, and coverage reporting.
+
+
+12.25 established the sign needs **appearance, not outline**. Before building
+anything, measured what the footage actually affords. Board `minAreaRect` on real
+clips (YOLO-seg, native 854x480):
+
+| clip | detected | long side | short side | mask area |
+|---|---|---|---|---|
+| kickflip | 6/6 | 118 px | 27 px | 1774 px |
+| heelflip | 5/5 | 119 px | 28 px | 1862 px |
+| tre_flip | 7/7 | 108 px | 32 px | 1458 px |
+| fs_180_kickflip | 3/4 | 64 px | 25 px | 1329 px |
+
+**The board is ~118 x 27 px with ~1800 mask pixels.** That single number decides
+the design, and it argues *against* the trucks idea as first choice.
+
+#### Why trucks are the weaker option here
+
+A truck/hanger is roughly 8–12 px on a real deck. At a 27 px short side, each
+truck is a **sub-half-width protrusion on each of 2 trucks** — about 4–6 % of the
+board's pixels, and *only visible when the board is face-on to the camera*. Three
+concrete problems:
+
+1. **They are occluded exactly when they matter.** During a kickflip the rider's
+   feet are on the board; the trucks sit on the underside, hidden by the deck for
+   most of the flip. Trucks are most visible when the board is *flat and held* —
+   the one moment there is no rotation to measure.
+2. **They are the wrong cue for the roll axis anyway.** Trucks reveal which face
+   is *down* (baseplate vs. hanger), which is a coarse up/down cue, not the
+   **direction** of a roll about the long axis. Kick-vs-heel is a *signed*
+   rotation; a truck tells you the board is upside-down, not which way it went
+   round. On a 180-shuvit + flip (the classes with the most data after `tre_flip`)
+   the truck reading is *identical* between a kickflip and a heelflip.
+3. **Sub-pixel structure at 27 px is below the mask's own noise.** A 4–6 % pixel
+   perturbation is comparable to segmentation jitter between frames, so it would
+   need to survive averaging over 48 frames to become a usable feature — and
+   averaging is what destroyed the sign in the first place.
+
+#### Why grip tape vs. graphic is the stronger first move
+
+It uses the **~1800 interior pixels** rather than a 50-pixel protrusion, and it is
+the *definition* of the quantity we need:
+
+- **It is a per-pixel decision, so it aggregates.** A dark-vs-bright split over
+  1800 pixels has a real standard error; a 4 % protrusion does not.
+- **It is self-normalising per frame.** Compute the median luminance *inside the
+  mask* and compare each half-board against it. A global lighting change shifts
+  both halves equally and cancels — the same property that makes
+  `foreshortening` camera-distance-invariant.
+- **It needs no geometric precision**, so it survives the board being small,
+  blurred, or partly occluded by a foot — which is most of a real kickflip.
+
+**Known failure mode, stated up front:** a black-bottomed board with black grip
+tape has no contrast. That is not a rare edge case — dark-graphic decks are common
+— so this cue will have a genuine blind spot and must report coverage, not be
+trusted as a universal sign detector. This is the honest cost of the approach and
+the reason to measure coverage before trusting accuracy.
+
+#### The honest comparison
+
+| | grip tape vs. graphic | trucks |
+|---|---|---|
+| pixels per frame | ~1800 | ~50–100 |
+| usable during the flip | yes | mostly occluded |
+| resolves *sign* | yes (left-dark vs. right-dark) | no — up/down only |
+| lighting robustness | high (per-frame normalised) | high |
+| blind spot | dark-on-dark decks | face-on frames |
+| extra model needed | none (reuses the existing mask) | none, but unreliable |
+
+**Recommendation: build grip-tape-vs-graphic first, as a validation-only probe,
+not a cached feature.** Two reasons. It needs no re-extraction, so it costs
+minutes rather than a 671-clip pass. And it answers the only question that
+matters before we spend that pass: **does interior contrast separate kickflip from
+heelflip at all on real clips?** If it does not, the trucks idea is also unlikely
+to save us and the whole sign-based direction should be abandoned in favour of
+treating flip sign as unlearnable at this data scale — which is itself a publishable
+finding. If it does, we have a validated feature and the extraction pass is
+justified.
+
+The probe must be judged **per clip, on kickflip-vs-heelflip pairs**, with the
+confusion reported, not folded into a headline F1.
+
+**Not claimed:** nothing measured yet; this is a design decision, not a result.
+
 
 Revived M2 to test the belief that board-axis measurement was merely unfinished.
 **It is not unfinished — it is measuring the wrong thing, and the plan's own
