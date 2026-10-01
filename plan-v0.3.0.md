@@ -1513,9 +1513,58 @@ board feature for classification. **Recommendation: stop pushing M2**, take the
 pose-only result as M1/M2's outcome, and do not build a temporal model inside a
 milestone that has already run long.
 
----
+### 12.20 M3 step 1: recogniser built, abstention tuned, end-to-end working (2026-09-28)
 
-## 13. Risks & mitigations
+Per the 12.19 recommendation, M2 was **stopped** (board stream deferred to M3,
+where rotation heads take a per-frame quantity) and the work went into the first
+M3 step: get a working end-to-end loop before touching rotation heads.
+
+`skateid/recognize.py` — plan sections 6 and 10 make this the **single source of
+truth** both the CLI and the web page wrap, so there is no second model to drift.
+Two commands: `skateid fit` and `skateid recognize`.
+
+**Measured on the holdout (9 classes, 238 train / 60 holdout):**
+
+| | |
+|---|---|
+| macro-F1 with abstention | **0.1882** |
+| **abstain rate** | **32 %** |
+| macro-F1 when it names a trick | 0.2556 |
+| accuracy when it names a trick | **0.2927** |
+| vocabulary | 9 classes; 22 excluded, still reachable via rotation heads |
+
+**The product is the abstention threshold, not the accuracy.** At 29 % accuracy when
+it speaks, a recogniser that always answers is confidently wrong ~70 % of the time.
+So `predict()` has two independent gates — a top-2 **margin** (0.15) and a top-1
+**floor** (0.35) — and **every abstention reports which rule fired**, so the
+behaviour is auditable rather than a black box. A third case exists and is handled:
+if the mirror has no name for the supplied stance, it abstains rather than showing
+the other reading, which would be a confidently wrong label.
+
+Real output, unedited:
+
+```
+...luan_oliv  not sure     0.38  tre_flip 0.38 vs fs_bigspin_heelflip 0.28 (margin 0.10 < 0.15)
+...luan_oliv  not sure     0.27  top class fs_180_kickflip only 0.27 (floor 0.35)
+...luan_oliv  fs_bigspin   0.66  stance not given; both readings shown
+                            regular: fs_bigspin  goofy: bs_bigspin
+```
+
+**Stance remains an input, never a guess.** `auto` returns both readings and says
+so; `regular`/`goofy` selects one; `fakie`/`switch`/`nollie` raise. `Recognizer.load`
+reads a JSON checkpoint (means/scales rather than a pickle), so the artefact is
+inspectable and does not depend on a sklearn version.
+
+**Deliberately not built yet:** the web server, the three rotation heads, and the
+abstention *calibration* sweep. The defaults above are reasoned, not tuned, and
+the M3 gate ("correct-or-abstained >= 90 % **while** abstaining <= 30 %") needs a
+measured threshold rather than a plausible one.
+
+**Not claimed:** no M3 gate result. 32 % abstention against 29 % accuracy-when-named
+means correct-or-abstained is roughly 0.32 + 0.68*0.29 ≈ **0.52**, well short of
+90 % — which is the honest arithmetic of a 25 %-accuracy model and the reason the
+rotation heads, not tuning, are what M3 actually needs.
+
 
 | Risk | Mitigation |
 |---|---|

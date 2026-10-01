@@ -36,6 +36,7 @@ from skateid.features import (
     unwrap_angles,
     windowed_sweep,
 )
+from skateid.recognize import Recognizer
 from skateid.stance import (
     CONFIDENCE_FLOOR,
     SUGGESTION_COLUMN,
@@ -983,6 +984,167 @@ def test_confusion_matrix_folds_low_support_classes_and_stays_readable():
 
     # And it is narrow enough to read.
     assert max(len(line) for line in folded.splitlines()) < 200
+
+
+def _toy_recognizer(taxonomy, **kwargs):
+    """A recogniser with hand-set weights, so behaviour is deterministic.
+
+    Two classes with a large coefficient on the first feature, so a test can
+    choose to be confident or not by choosing that feature's value.
+    """
+    import numpy as np
+
+    from skateid.recognize import Recognizer
+
+    return Recognizer(
+        classes=["kickflip", "heelflip"],
+        means=np.zeros(2),
+        scales=np.ones(2),
+        coefficients=np.array([[4.0, 0.0], [-4.0, 0.0]]),
+        intercepts=np.zeros(2),
+        taxonomy=taxonomy,
+        **kwargs,
+    )
+
+
+def test_recognizer_abstains_rather_than_guessing():
+    """The core M3 behaviour: at ~25 % accuracy, silence beats a wrong answer.
+
+    Two independent gates, both of which must be able to fire. A near-tie between
+    the top two must abstain even when the top probability is high, and a low top
+    probability must abstain even when the margin is large. Either one alone would
+    let through a confident mistake, which at this accuracy is the common case.
+    """
+    taxonomy = Taxonomy.load("data/tricks.json", "data/flatground_allowlist.csv")
+    confident = _toy_recognizer(taxonomy)
+
+    # Clearly kickflip (feature[0] large positive).
+    prediction = confident.predict(np.array([5.0, 0.0]), clip_id="c1")
+    assert prediction.label == "kickflip"
+    assert not prediction.abstained
+
+    # Near-tie: both features equal, so the logits cancel to a tie.
+    tied = confident.predict(np.array([0.0, 0.0]), clip_id="c2")
+    assert tied.abstained, "a near-tie must abstain"
+    assert tied.label is None
+    assert tied.display == "not sure"
+    assert "margin" in tied.reason or "floor" in tied.reason
+
+    # The floor gate fires independently of the margin. Weak coefficients give a
+    # low top-1 even when one class clearly leads, which the margin alone would
+    # wave through -- so a high floor must still stop it.
+    unsure = _toy_recognizer(taxonomy, floor=0.99)
+    weak = _toy_recognizer(taxonomy)
+    weak.coefficients = np.array([[0.05, 0.0], [-0.05, 0.0]])
+    weak.floor = 0.99
+    gated = weak.predict(np.array([5.0, 0.0]), clip_id="c3")
+    assert gated.confidence < 0.99, f"fixture should be low-confidence, got {gated.confidence}"
+    assert gated.abstained and gated.label is None
+    assert "floor" in gated.reason
+
+    # Both gates are reported, never silent.
+    for prediction in (tied, gated):
+        assert prediction.reason, "an abstention must say which rule fired"
+
+
+def test_recognizer_stance_is_an_input_never_a_guess():
+    """`auto` must show both readings rather than pick one.
+
+    The sign frame is not recoverable from the footage, so silently choosing a
+    stance mirrors every label. A riding direction must be rejected outright,
+    because `fakie`/`switch` cannot fix the sign frame and using one would be the
+    exact silent corruption the guardrail exists to catch.
+    """
+    taxonomy = Taxonomy.load("data/tricks.json", "data/flatground_allowlist.csv")
+    recognizer = _toy_recognizer(taxonomy)
+
+    auto = recognizer.predict(np.array([5.0, 0.0]), stance="auto")
+    assert not auto.abstained
+    assert auto.stance is None
+    assert auto.readings["regular"] == "kickflip"
+    assert auto.readings["goofy"] == "heelflip", "the mirror pair must both be shown"
+
+    # A confirmed stance selects exactly one reading.
+    goofy = recognizer.predict(np.array([5.0, 0.0]), stance="goofy")
+    assert goofy.label == "heelflip"
+    assert goofy.stance == "goofy"
+
+    for bad in ("fakie", "switch", "nollie"):
+        with pytest.raises(ValueError, match="riding direction"):
+            recognizer.predict(np.array([5.0, 0.0]), stance=bad)
+
+
+def test_recognizer_round_trips_through_json():
+    """The checkpoint must survive a save/load without changing its answers.
+
+    Saved as JSON rather than a pickle so the artefact is inspectable and does not
+    depend on a sklearn version -- a checkpoint that cannot be loaded on a
+    different machine is not a checkpoint.
+    """
+    taxonomy = Taxonomy.load("data/tricks.json", "data/flatground_allowlist.csv")
+    recognizer = _toy_recognizer(taxonomy)
+    vector = np.array([5.0, 0.0])
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = recognizer.save(Path(directory) / "model.json")
+        reloaded = Recognizer.load(path, taxonomy)
+
+    before = recognizer.predict(vector, stance="regular").as_dict()
+    after = reloaded.predict(vector, stance="regular").as_dict()
+    assert before["label"] == after["label"] == "kickflip"
+    assert before["confidence"] == pytest.approx(after["confidence"])
+
+    # A dimension mismatch is a loud error, not a silently truncated vector.
+    with pytest.raises(ValueError, match="dims"):
+        reloaded.predict(np.zeros(7))
+
+
+def test_recognizer_handles_a_constant_feature_column():
+    """A dead column has zero variance, and dividing by it would poison everything.
+
+    StandardScaler leaves a 0/1 for a constant column rather than 1/0, and one
+    inf in the feature vector would make every probability NaN.
+    """
+    taxonomy = Taxonomy.load("data/tricks.json", "data/flatground_allowlist.csv")
+    recognizer = _toy_recognizer(taxonomy)
+    recognizer.scales = np.array([1.0, 0.0])
+    assert np.all(np.isfinite(list(recognizer.probabilities(np.array([3.0, 7.0])).values())))
+
+
+def test_confusion_matrix_folds_low_support_classes_and_stays_readable():
+    """M0's named deliverable is 'prints a confusion matrix'; it has to be readable.
+
+    A 23-class matrix is ~576 characters wide, which no terminal shows in one
+    piece, so the table keeps the highest-support classes and folds the rest into
+    an (other) row and column, stating how many. The fold must preserve the totals.
+    """
+    labels = [f"c{i:02d}" for i in range(14)]
+    cm = [[0] * 14 for _ in range(14)]
+    for i, support in enumerate(range(14, 0, -1)):
+        cm[i][i] = support
+        cm[i][13] = 1
+    total = sum(sum(row) for row in cm)
+
+    folded = format_confusion_matrix(cm, labels, max_labels=5)
+    assert "c00" in folded and "c13" not in folded, "keeps the highest-support class"
+    assert "9 lower-support class(es) folded" in folded
+    assert "(other x9)" in folded
+    assert max(len(line) for line in folded.splitlines()) < 200
+
+    # The visible numbers must still add up to the whole matrix.
+    body = folded.splitlines()[2:-1]
+    assert len(body) == 6, "5 kept classes plus the (other) row"
+    visible = [int(token) for line in body for token in line.split()[-6:]]
+    assert sum(visible) == total, (sum(visible), total)
+
+    # max_labels=None prints everything, with no fold note.
+    full = format_confusion_matrix(cm, labels, max_labels=None)
+    assert "c13" in full and "folded" not in full
+    assert len(full.splitlines()) == len(labels) + 2
+
+    # A matrix that already fits is printed untouched.
+    small = format_confusion_matrix([[1, 0], [0, 1]], ["a", "b"], max_labels=5)
+    assert "folded" not in small and len(small.splitlines()) == 4
 
 
 def test_guardrail_rejects_a_riding_direction_used_as_a_stance():

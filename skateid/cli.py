@@ -501,6 +501,83 @@ def probe_cmd(args) -> int:
     return 0
 
 
+def fit_model_cmd(args) -> int:
+    """Fit the recogniser on pose features and write a JSON artefact."""
+    from .recognize import fit
+
+    taxonomy = default_taxonomy()
+    frame = pd.read_csv(args.manifest, dtype={"clip_id": str})
+    recognizer, metrics = fit(
+        frame, Path(args.cache_dir), taxonomy,
+        include_board=args.with_board, min_train_clips=args.min_train_clips,
+        margin=args.margin, floor=args.floor,
+    )
+    out = recognizer.save(Path(args.checkpoint))
+    excluded = metrics["excluded_classes"]
+    print(f"fitted {metrics['classes']} classes on {metrics['train_clips']} clips "
+          f"({metrics['dims']} dims) -> {out}")
+    print(f"  restricted vocabulary: {len(excluded)} classes below {args.min_train_clips} "
+          f"training clips are excluded; they stay reachable via the rotation heads, "
+          f"not lost")
+    if metrics["holdout_clips"]:
+        print(f"  holdout: {metrics['holdout_clips']} clips | "
+              f"macro-F1 {metrics['macro_f1_all_named']:.4f} with abstention | "
+              f"abstains {metrics['abstain_rate']:.0%} | "
+              f"macro-F1 {metrics['macro_f1_when_named']:.4f} / "
+              f"accuracy {metrics['accuracy_when_named']:.4f} when it speaks")
+    return 0
+
+
+def recognize_cmd(args) -> int:
+    """Recognise clips from cached features, printing what the model will say."""
+    from .recognize import Recognizer
+
+    taxonomy = default_taxonomy()
+    frame = pd.read_csv(args.manifest, dtype={"clip_id": str})
+    recognizer = Recognizer.load(Path(args.checkpoint), taxonomy,
+                                 margin=args.margin, floor=args.floor)
+
+    if args.dataset != "all":
+        frame = frame[frame["dataset"] == args.dataset]
+    frame = frame[frame["split_holdout"] != "train"] if args.holdout else frame
+    if args.label:
+        wanted = {item.strip() for item in args.label.split(",")}
+        frame = frame[frame["label"].isin(wanted)]
+    if args.limit:
+        frame = frame.head(args.limit)
+
+    from .features import EXTRACTOR_VERSION, load_features, pose_only_features, cache_key
+
+    cache = Path(args.cache_dir)
+    shown, named, correct = 0, 0, 0
+    for _, record in frame.iterrows():
+        vector = pose_only_features(cache, cache_key(record["clip_id"], EXTRACTOR_VERSION))
+        if vector is None:
+            continue
+        prediction = recognizer.predict(vector, clip_id=record["clip_id"], stance=args.stance)
+        shown += 1
+        if not prediction.abstained:
+            named += 1
+            if args.stance != "auto" and prediction.label == record["label"]:
+                correct += 1
+        if shown <= args.show or args.json:
+            if args.json:
+                print(json.dumps(prediction.as_dict()))
+                continue
+            readings = "  ".join(
+                f"{stance}: {name}" for stance, name in prediction.readings.items() if name
+            )
+            print(f"{record['clip_id'][:46]:<46} {prediction.display:<20} "
+                  f"{prediction.confidence:.2f}  {prediction.reason}")
+            if readings:
+                print(f"{'':<46} {readings}")
+    if shown and args.stance != "auto":
+        print(f"\n{named}/{shown} named ({1 - named / shown:.0%} abstained); "
+              f"{correct}/{named} correct when named" if named else
+              f"\n0/{shown} named — the model abstained on everything")
+    return 0
+
+
 def extract_cmd(args) -> int:
     """Run pose + board extraction over the manifest and cache the result."""
     from . import features
@@ -742,6 +819,33 @@ def main() -> int:
     )
     probe_p.add_argument("--out", default="", help="Optional path to write the metrics as JSON")
 
+    model_p = subparsers.add_parser(
+        "fit", help="Fit the recogniser on pose features and save a JSON checkpoint"
+    )
+    model_p.add_argument("--manifest", default="data/manifest.csv", help="Path to manifest CSV")
+    model_p.add_argument("--cache-dir", default="data/cache", help="Feature cache directory")
+    model_p.add_argument("--checkpoint", default="checkpoints/recognizer.json", help="Where to save")
+    model_p.add_argument("--min-train-clips", type=int, default=15,
+                         help="Restricted vocabulary: drop classes below this many training "
+                              "clips (plan 12.13). They stay reachable via the rotation heads.")
+    model_p.add_argument("--with-board", action="store_true", help="Also use the board summary scalars")
+    model_p.add_argument("--margin", type=float, default=0.15, help="Abstain below this top-2 gap")
+    model_p.add_argument("--floor", type=float, default=0.35, help="Abstain below this top-1 probability")
+
+    rec_p = subparsers.add_parser("recognize", help="Name clips from cached features, or say 'not sure'")
+    rec_p.add_argument("--manifest", default="data/manifest.csv", help="Path to manifest CSV")
+    rec_p.add_argument("--cache-dir", default="data/cache", help="Feature cache directory")
+    rec_p.add_argument("--checkpoint", default="checkpoints/recognizer.json", help="Model JSON")
+    rec_p.add_argument("--dataset", choices=["all", "skateboardml", "skateai"], default="skateai")
+    rec_p.add_argument("--stance", default="auto", help="auto (show both readings) | regular | goofy")
+    rec_p.add_argument("--limit", type=int, default=None, help="Cap clips")
+    rec_p.add_argument("--show", type=int, default=8, help="Rows to print")
+    rec_p.add_argument("--holdout", action="store_true", help="Only the holdout split")
+    rec_p.add_argument("--label", default="", help="Comma-separated labels to include")
+    rec_p.add_argument("--json", action="store_true", help="Machine-readable output")
+    rec_p.add_argument("--margin", type=float, default=None, help="Override the saved margin")
+    rec_p.add_argument("--floor", type=float, default=None, help="Override the saved floor")
+
     extract_p = subparsers.add_parser(
         "extract", help="Extract pose + board features for every clip and cache them"
     )
@@ -834,6 +938,10 @@ def main() -> int:
         return probe_cmd(args)
     elif args.command == "oracle":
         return oracle_cmd(args)
+    elif args.command == "fit":
+        return fit_model_cmd(args)
+    elif args.command == "recognize":
+        return recognize_cmd(args)
     return 0
 
 if __name__ == "__main__":
