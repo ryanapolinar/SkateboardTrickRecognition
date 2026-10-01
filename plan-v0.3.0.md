@@ -1468,6 +1468,53 @@ believed, what was measured, and why the belief changed* — which is what lets 
 later reader distinguish a considered revision from a moving target. The file stays
 \plan-v0.3.0.md\; the sections carry the history.
 
+### 12.19 Milestone status as of 2026-09-28 (M0–M2)
+
+Consolidated, because the per-round sections are deliberately verbose and this is
+the summary a reader should start from.
+
+| | measured | gate | status |
+|---|---|---|---|
+| **M0** — env, 671 clips, manifest, both splits, B0/B1/B2, guardrail | B1 VideoMAE **0.0401**; B0 0.0101 | confusion matrix + a floor | **CLOSED** |
+| **M1** — CUDA, stance-as-input, extraction pipeline, pose features | pose-only, 22 classes: **0.0406** (1.01x floor) | no accuracy gate (12.7) | **CLOSED** |
+| **M2** — board corners, axis mapping, foreshortening | pose-only 9 classes **0.2048** (5.08x); pose+board **0.2048** | pose+board must beat pose-only | **NOT MET** |
+
+**Everything currently true, in one place:**
+
+| | |
+|---|---|
+| **Best measured result** | pose-only, 9 classes (>=15 train clips): **macro-F1 0.2048, accuracy 0.250** — against a dummy-majority baseline of 0.0473 / 0.233, so it is not riding class imbalance |
+| **At 3 classes** (>=30 clips) | pose-only 0.4623 (11.33x); dummy 0.2222 / 0.500 |
+| **Unrestricted 22 classes** | 0.0406 — **1.01x the floor**, and 12.13 showed this is a *data* ceiling (~12 clips/class), not a representation ceiling |
+| **Board stream** | real per clip (foreshortening dips 0.83 -> 0.59 through a flip), but carries **no usable signal to a linear model**: 4 scalars are exactly neutral, 2640 dims actively hurt at 9 classes |
+| **Split** | video-disjoint, **not skater-disjoint** — nothing here is a generalisation claim |
+| **Tests** | 59 passed, 1 xfailed (a known, named bug kept visible) |
+
+**What M0–M2 established beyond the numbers:**
+
+1. **The board axis mapping** (7.1) — kickflip rolls about the long axis, a shuvit
+   is a yaw, an impossible about the short axis. Never written down anywhere, and
+   the single most useful finding of the last three days.
+2. **The sign frame is an input**, override-only, with both-stances naming that is
+   exact because the mirror is a bijection over all 41 names.
+3. **Two real bugs fixed** — `net_sweep` measured endpoint difference (a full 360°
+   flip scored zero), and extraction ran at a distorted 640x640 instead of native
+   854x480.
+4. **The 22-class ceiling is the dataset.** Four separate regularisers (pooled,
+   PCA-30, confidence-stripped) all land at the floor, so no feature engineering
+   moves it.
+5. **Six documented failures** (12.8–12.18), kept because the corrections —
+   aliasing -> sampling -> resolution -> **wrong axis** — are the reusable lesson.
+
+**Honest read on M2's gate.** It requires the board stream to be *load-bearing*,
+and it is not: pose+board ties pose-only exactly. Six rounds produced one genuine
+discovery (the axis mapping) and one genuine bug (resolution), but not a usable
+board feature for classification. **Recommendation: stop pushing M2**, take the
+pose-only result as M1/M2's outcome, and do not build a temporal model inside a
+milestone that has already run long.
+
+---
+
 ## 13. Risks & mitigations
 
 | Risk | Mitigation |
