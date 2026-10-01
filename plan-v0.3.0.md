@@ -1306,13 +1306,13 @@ and stopped. **The second is the one that carries a kickflip.** Built now, as
 `features.board_axes()` / `foreshortening_series()`, measuring
 ``long_len / (long_len + short_len)`` from the segmented mask.
 
-**Verified on synthetic input first**, because a flat-versus-rolled board is a known
-quantity: a 4:1 board seen broadside reads **0.806**, and rolling toward a square
-reads 0.667 -> 0.543 -> 0.500. Monotonic, and self-normalising (a 40x10 board and a
-400x100 board give identical ratios, so camera distance drops out).
+**Verified on synthetic input first**: a 4:1 board seen broadside reads **0.806**,
+and rolling toward a square reads 0.667 -> 0.543 -> 0.500. Monotonic, and
+self-normalising (a 40x10 board and a 400x100 board give identical ratios, so
+camera distance drops out).
 
 **And on real footage it separates.** 48 samples at native 854x480; "drop" is
-``median - min`` of the series, i.e. how far the board goes edge-on:
+``median - min``, i.e. how far the board goes edge-on:
 
 | clip | measured | flat median | min (dip) | **drop** |
 |---|---|---|---|---|
@@ -1329,33 +1329,74 @@ The `fs_360` trace shows the shape physics predicts, in full:
 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.83 0.81 0.81  . 0.72  . 0.67  .  . 0.65 0.64 0.71 0.79 0.77 0.82 0.79 0.78 0.65 0.59 0.68 0.77 0.78 0.79 0.81 0.81 0.78 0.80
 ```
 
-**Flat at 0.83, dipping to 0.59 through the middle of the clip, recovering to
-0.80.** That is a kickflip, measured: the board is seen going edge-on and coming
-back.
+**Flat at 0.83, dipping to 0.59 mid-clip, recovering to 0.80** — a kickflip,
+measured. The long-axis angle over the same clips is weak (max step 5-55 deg),
+exactly as section 7.1's axis mapping predicts.
 
-**This is the first genuine positive result in M2.** The signal was in the footage
-the whole time; six rounds of work failed because the feature being measured was
-the one quantity a kickflip barely changes. The long-axis angle is genuinely weak
-here (max step 5-55 deg across all traces) and foreshortening is strong (0.21
-drop) — exactly what section 7.1's axis mapping predicts.
+**Two caveats:** the **magnitude is not calibrated** (0.21/0.13/0.04 are ambiguous
+between a full roll, a partial one, and a catch), and **`fs_shuvit` also dips
+(0.10)** when section 7.1 says a yaw should leave foreshortening flat. Unresolved.
 
-**Two honest caveats:**
+### 12.17 First gated measurement: pose PASSES, and the board stream HURTS (2026-09-28)
 
-1. **The magnitude is not calibrated.** 0.21 is a *360-degree* roll; 0.13 and 0.04
-   are ambiguous between a partial roll, a catch, and clip-to-clip variation in
-   trick height. The ordinal separation is real; the absolute value is not yet
-   trustworthy as "number of flips".
-2. **`fs_shuvit` also dips (0.10)**, and per section 7.1 a shuvit is a *yaw*,
-   which should leave foreshortening roughly constant. Either the board tilts
-   during the shuvit, or the mask is picking up something else. **Unresolved.**
+`skateid probe --min-train-clips N` — the first run in this project to clear a
+gate. Results on the video-disjoint holdout, logistic regression:
 
-**Next, now a small job:** re-extract the board stream at 854x480 with
-foreshortening included, then run `probe --with-board` on the restricted vocabulary
-for the first time — the first measurement in this project that could plausibly
-clear a gate.
+| vocabulary | stream | accuracy | macro-F1 | vs floor (0.0401) | dummy acc | dummy macro-F1 |
+|---|---|---|---|---|---|---|
+| **9 classes** (>= 15 train clips) | pose only | 0.250 | **0.2048** | **5.08x — GATE MET** | 0.233 | 0.0473 |
+| 9 classes | pose + board | 0.200 | 0.1476 | 4.04x — not met | | |
+| 9 classes | **board only** | 0.117 | **0.0822** | 2.05x | | |
+| **3 classes** (>= 30 train clips) | pose only | 0.536 | **0.4623** | **11.33x** | 0.500 | 0.2222 |
 
-**Not claimed:** no M2 result yet. The pose-only ablation (0.0406) is still the only
-measured representation result.
+**Two genuine results, and one that contradicts the last three days of work.**
+
+**1. Pose features pass the gate, and beat the dummy baseline.** At 9 classes,
+0.2048 macro-F1 against a 0.0473 dummy — and accuracy 0.250 vs 0.233, so it is not
+merely riding the class imbalance. At 3 classes, 0.4623 vs a 0.2222 dummy. This is
+the first capability claim in the project, and it holds under the §12.13
+restriction that makes it meaningful. §12.5's "reduce dimensionality, then the
+transformer" is **superseded**: the 22-class ceiling was the data, and on data
+adequate classes, pose alone clears the bar.
+
+**2. The board stream makes it worse.** pose-only 0.2048 -> pose+board **0.1476**.
+Board alone reaches 0.0822 — above the floor but weak — and **adding it to pose
+actively costs 28 % of the score**. Diagnosis, from the cached scalars:
+
+```
+net_sweep:  kick-family mean -1.15   other -1.14   (sd 0.79)
+```
+
+**The feature does not discriminate.** Kick-family and everything else have
+*identical* mean sweep. It is a large-variance quantity (sd 0.79 against a 0.01
+family difference) that swamps the pose signal.
+
+**This corrects §12.16.** The per-clip traces were real and the foreshortening dip
+is real — but it is real *per clip*, not *per trick family*. A model needs
+consistency across clips to use it, and the segmentation noise plus the
+uncalibrated magnitude (§12.16's own caveat) make it inconsistent. Picking the
+`fs_360` clips in §12.16 as the demonstration, from three labels, was
+cherry-picking: the same feature on the full set carries no family information.
+**That was my error, and it is the error that made 12.16 read as a success.**
+
+**Why the board stream hurts rather than being neutral:** 2448 pose dims already
+outnumber the 110 training rows, so extra noisy columns cost more in variance than
+they add in signal.
+
+**Not claimed:** no M2 gate result. The gate was written for pose+board, and
+pose+board **does not meet it**. What passes is the pose-only ablation, which was
+never the M2 gate. Stating that plainly rather than banking the 5.08x.
+
+**Next, and the honest list:**
+1. **Calibrate the magnitude** before using the board stream again — the dip depth
+   is real per clip but the sweep statistic is not measuring rotation. `dip =
+   median - min`, not `net_sweep`, is the quantity §12.16 actually demonstrated.
+2. **Reduce board dimensionality** — 2640 board dims against 110 rows is why it
+   hurts. Three summary scalars (dip depth, dip timing, coverage) is the honest
+   version.
+3. **Then re-run.** If a 3-scalar board stream beats the 0.2048 pose-only number,
+   M2's gate is genuinely met.
+
 
 
 

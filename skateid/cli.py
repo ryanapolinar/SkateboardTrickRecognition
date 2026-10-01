@@ -431,6 +431,25 @@ def probe_cmd(args) -> int:
         print(f"error: no rows with split_holdout == {HOLDOUT_VALUE!r} in the manifest", file=sys.stderr)
         return 2
 
+    # Restricted vocabulary (plan 12.13). The 22-class problem is data-limited at
+    # ~12 clips/class, not representation-limited, so scoring it measures the
+    # dataset rather than the features. The restriction is reported, never applied
+    # silently, and holdout rows whose class is excluded are dropped with a count.
+    min_clips = args.min_train_clips
+    if min_clips:
+        train_counts = frame[frame["split_holdout"] != HOLDOUT_VALUE]["label"].value_counts()
+        keep = set(train_counts[train_counts >= min_clips].index)
+        dropped_classes = len(set(frame["label"]) - keep)
+        frame = frame[frame["label"].isin(keep)]
+        holdout = holdout[holdout["label"].isin(keep)]
+        print(f"restricted vocabulary: {len(keep)} classes with >= {min_clips} training clips "
+              f"({dropped_classes} classes excluded) — these stay reachable via the "
+              f"rotation heads, not lost")
+        if len(keep) < 2:
+            print("error: too few classes survive the restriction", file=sys.stderr)
+            return 2
+        print(f"  classes: {sorted(keep)}")
+
     cache = Path(args.cache_dir)
     X_train, y_train, ids_train = features.load_feature_table(
         frame[frame["split_holdout"] != HOLDOUT_VALUE], cache, include_board=args.with_board
@@ -703,6 +722,11 @@ def main() -> int:
     probe_p.add_argument("--with-board", action="store_true", help="Also use the board box stream")
     probe_p.add_argument("--c", type=float, default=1.0, help="Logistic regression C")
     probe_p.add_argument("--examples", type=int, default=6, help="How many per-clip examples to print")
+    probe_p.add_argument(
+        "--min-train-clips", type=int, default=0,
+        help="Restrict to classes with >= N training clips (plan 12.13). The 22-class "
+        "problem is data-limited, not representation-limited. 0 disables it.",
+    )
     probe_p.add_argument("--out", default="", help="Optional path to write the metrics as JSON")
 
     extract_p = subparsers.add_parser(
