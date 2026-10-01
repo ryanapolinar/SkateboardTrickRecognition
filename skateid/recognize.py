@@ -149,13 +149,19 @@ class RotationHeads:
 
     AXES = ("flip", "board_spin", "body_spin")
 
-    def __init__(self, axes, family, families, taxonomy, include_board=False, metrics=None):
+    def __init__(self, axes, family, families, taxonomy, include_board=False, metrics=None,
+                 axis_scales=None):
         self.axes = axes
         self.family = family
         self.families = list(families)
         self.taxonomy = taxonomy
         self.include_board = include_board
         self.metrics = metrics or {}
+        # Per-axis residual SD, used to make the three axes comparable when
+        # ranking dictionary triples. None until fitted; ranking then falls back
+        # to unit weights, which is measurably worse but never crashes.
+        self.axis_scales = dict(axis_scales) if axis_scales else None
+        self._candidates = None
 
     def predict_rotations(self, features):
         """Predicted (flip, board_spin, body_spin), **unrounded**.
@@ -200,22 +206,84 @@ class RotationHeads:
         index = int(probs.argmax())
         return classes[index], float(probs[index])
 
-    def name_for(self, rotations):
-        """Dictionary lookup from predicted rotations to a trick name.
+    def candidates(self):
+        """Every rotation triple in the dictionary, cached.
 
-        Returns ``None`` when the rounded triple matches nothing. "No known trick"
-        is the honest outcome; inventing the nearest name is exactly the
-        confident-wrong failure this project avoids.
+        Ranking happens against this list instead of rounding, so a prediction
+        never has to land exactly on an integer triple.
         """
-        triple = Rotation(
-            flip=int(round(rotations["flip"])),
-            board_spin=int(round(rotations["board_spin"])),
-            body_spin=int(round(rotations["body_spin"])),
+        if self._candidates is None:
+            seen, triples = set(), []
+            for name in self.taxonomy.dictionary.expressible_names():
+                rot = self.taxonomy.dictionary.rotation_for_label(name)
+                if rot is not None and rot not in seen:
+                    seen.add(rot)
+                    triples.append(rot)
+            self._candidates = triples
+        return self._candidates
+
+    def rank_names(self, rotations, top_k: int = 3):
+        """Rank dictionary triples by axis-scaled distance. (Option 1.)
+
+        Each axis is divided by its training residual SD, so "off by 0.3 flips"
+        and "off by 0.3 half-turns" weigh the same. Plain Euclidean distance on
+        raw axes is not comparable across them: board/body spin live in
+        half-turns and can run to +-2 while flip rarely exceeds +-1, so an
+        unscaled metric quietly under-weights board rotation.
+
+        Returns ``[(name, distance), ...]`` sorted nearest-first. This replaces
+        per-axis ``round()``: rounding a triple like (0.44, 0.72, 0.45) to
+        (0, 1, 0) reports ``fs_180`` with total confidence even though the
+        prediction was nowhere near it.
+        """
+        weights = self.axis_scales or {axis: 1.0 for axis in self.AXES}
+        prediction = np.array(
+            [float(rotations[axis]) / float(weights.get(axis, 1.0)) or 0.0
+             for axis in self.AXES],
+            dtype=np.float64,
         )
-        try:
-            return self.taxonomy.dictionary.label_from_rotation(triple)
-        except Exception:
+        ranked = []
+        for rot in self.candidates():
+            other = np.array(
+                [float(getattr(rot, axis)) / float(weights.get(axis, 1.0)) or 0.0
+                 for axis in self.AXES],
+                dtype=np.float64,
+            )
+            distance = float(np.sqrt(((prediction - other) ** 2).sum()))
+            ranked.append((self.taxonomy.dictionary.label_from_rotation(rot), distance))
+        ranked.sort(key=lambda pair: pair[1])
+        return ranked[: max(top_k, 1)]
+
+    def name_for(self, rotations, max_distance: Optional[float] = None):
+        """Nearest dictionary name, or ``None`` if nothing is close. (Options 1+2.)
+
+        The residual distance is the "not sure" signal plan section 4/8 asks for,
+        so it is *kept* rather than discarded by rounding, and returned to the
+        caller as a distance instead of being buried in a boolean.
+
+        ``max_distance`` is in scaled units: above it, the honest answer is "no
+        known trick", which is preferable to a confident wrong name.
+        """
+        ranked = self.rank_names(rotations, top_k=1)
+        if not ranked:
             return None
+        name, distance = ranked[0]
+        if max_distance is not None and distance > max_distance:
+            return None
+        return name
+
+    def rotation_confidence(self, rotations):
+        """Confidence in the name, from the residual distance. (Option 2.)
+
+        Monotone in distance and independent of how many dictionary entries
+        happen to be nearby, which a softmax over names would not be. 1.0 at an
+        exact hit, decaying with distance; callers compare against a tuned floor.
+        """
+        ranked = self.rank_names(rotations, top_k=1)
+        if not ranked:
+            return 0.0, None, None
+        name, distance = ranked[0]
+        return float(np.exp(-distance)), name, distance
 
 
 class Recognizer:
@@ -454,6 +522,30 @@ def fit_rotation_heads(
     family_model = LogisticRegression(max_iter=3000, C=C)
     family_model.fit(scaled, aligned["body_family"].to_numpy())
 
+    # Residual SD per axis, used to make the three axes comparable when ranking
+    # dictionary triples. Plan 12.23.
+    #
+    # These MUST be out-of-fold. With 2448 features and 331 rows, ridge
+    # interpolates the training set almost exactly, so in-sample residuals come
+    # out around 0.02 -- three orders of magnitude below the real error. Dividing
+    # by them inflated every distance to ~19 and made the ranking metric
+    # meaningless (and the abstention sweep unable to keep a single clip).
+    # K-fold gives residuals the model has not seen, at 5 fits per axis.
+    from sklearn.model_selection import KFold
+
+    axis_scales = {}
+    folds = min(5, max(2, X_train.shape[0] // 20))
+    splitter = KFold(n_splits=folds, shuffle=True, random_state=0)
+    for axis in RotationHeads.AXES:
+        target = aligned[axis].to_numpy(float)
+        oof = np.zeros_like(target)
+        for train_idx, test_idx in splitter.split(scaled):
+            fold = Ridge(alpha=alpha).fit(scaled[train_idx], target[train_idx])
+            oof[test_idx] = fold.predict(scaled[test_idx])
+        residual = target - oof
+        # Floor the scale: a near-zero value would again make distances explode.
+        axis_scales[axis] = max(float(np.sqrt((residual ** 2).mean())), 1e-3)
+
     heads = RotationHeads(
         axes,
         {"coef": family_model.coef_, "intercept": family_model.intercept_,
@@ -466,6 +558,7 @@ def fit_rotation_heads(
         list(family_model.classes_),
         taxonomy,
         include_board=include_board,
+        axis_scales=axis_scales,
     )
 
     metrics = {
@@ -473,6 +566,7 @@ def fit_rotation_heads(
         "dropped_families": dropped,
         "min_family_clips": min_family_clips,
         "alpha": alpha,
+        "axis_scales": axis_scales,
         "train_clips": int(X_train.shape[0]),
         "dims": int(X_train.shape[1]),
         "holdout_clips": 0,
@@ -481,6 +575,10 @@ def fit_rotation_heads(
         "axis_mae": {},
         "name_accuracy": None,
         "name_hit_rate": None,
+        # Ranking metrics (option 1) and residual confidence (option 2).
+        "ranked_name_accuracy": None,
+        "ranked_top3_accuracy": None,
+        "mean_residual_distance": None,
     }
 
     X_test, y_test, ids_test = load_feature_table(
@@ -510,6 +608,25 @@ def fit_rotation_heads(
         named = [heads.name_for(heads.predict_rotations(row)) for row in X_test]
         metrics["name_hit_rate"] = float(np.mean([n is not None for n in named]))
         metrics["name_accuracy"] = float(np.mean([n == t for n, t in zip(named, truth["label"])]))
+
+        # Ranking (option 1) is now always defined: every prediction lands on some
+        # dictionary triple, so the old hit-rate question is obsolete. What matters
+        # is top-1 / top-3 accuracy and the residual that drives abstention (option 2).
+        labels = truth["label"].to_numpy()
+        top1 = [heads.rank_names(heads.predict_rotations(row), top_k=3) for row in X_test]
+        metrics["ranked_name_accuracy"] = float(
+            np.mean([bool(r) and r[0][0] == t for r, t in zip(top1, labels)])
+        )
+        metrics["ranked_top3_accuracy"] = float(
+            np.mean([bool(r) and t in [n for n, _ in r] for r, t in zip(top1, labels)])
+        )
+        distances = [r[0][1] for r in top1 if r]
+        metrics["mean_residual_distance"] = float(np.mean(distances)) if distances else None
+        # Sanity check that ranking and rounding can now disagree; if they ever
+        # match exactly the scaling is a no-op and one of the two paths is dead code.
+        metrics["ranked_vs_rounded_disagreements"] = int(
+            sum(1 for r, n in zip(top1, named) if r and r[0][0] != n)
+        )
 
     heads.metrics = metrics
     return heads, metrics

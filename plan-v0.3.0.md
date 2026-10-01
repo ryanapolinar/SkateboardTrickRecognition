@@ -1513,7 +1513,86 @@ board feature for classification. **Recommendation: stop pushing M2**, take the
 pose-only result as M1/M2's outcome, and do not build a temporal model inside a
 milestone that has already run long.
 
-### 12.22 Rotation heads: body-rotation family at 0.709, and a silent 0.398 (2026-09-28)
+### 12.23 Why 0.45 was not real data, and what ranking the dictionary did (and did not) fix (2026-09-28)
+
+**The 0.45 in (0.44, 0.72, 0.45) is not a partial rotation. It is regression
+shrinkage.** Ridge pulls every prediction toward the *mean of the target*, and
+these targets are mostly zeros:
+
+| | prediction | truth |
+|---|---|---|
+| training `body_spin` mean (the shrinkage centre) | **0.504** | — |
+| clips whose true `body_spin` is 1 | **0.598** | 1 |
+| clips whose true `body_spin` is 0 | **0.359** | 0 |
+
+So the whole axis is compressed into 0.36–0.60. A clip that truly rotates a full
+half-turn comes out at 0.60 — the model saying "somewhat more than the average
+clip", nowhere near a half-turn. **Nothing physically real about 0.45, and
+`alpha=0.1…100` barely moves it**, so this is not a regularisation-strength
+problem that tuning can fix.
+
+**Options 1 and 2 are implemented** (`rank_names`, `name_for`, `rotation_confidence`).
+Per-axis scaling by residual SD is real: the axes are *not* comparable raw, since
+board/body spin live in half-turns reaching ±3 while flip rarely leaves ±1.
+
+**They did not rescue name accuracy, and the honest result is that this is a
+representation ceiling, not a quantisation one:**
+
+| | value |
+|---|---|
+| old: round each axis, dictionary lookup | top-1 **0.068**, top-3 0.204 |
+| new: axis-scaled nearest triple over 41 | top-1 **0.062**, top-3 0.188, top-5 0.268, top-10 0.348 |
+| ranked-vs-rounded disagreements | **0 / 103** |
+| median rank of the true name | **17 of 41** |
+| abstention by residual distance | **flat ~0.06 at every threshold** (0.25 → 5.0) |
+
+**The disagreement count is the number that matters: zero.** The two paths pick
+the *same* name on every single holdout clip. Ranking changed nothing because
+rounding was not the bottleneck — when three axes each carry ~0.6 of noise, the
+nearest integer triple and the nearest scaled triple coincide. **My 12.22
+diagnosis that "the heads are close and rounding discards the residual" was
+wrong.** They are not close; MAE ≈ 0.6–1.1 half-turns *is* the full distance
+between neighbouring dictionary entries, so there is no residual to preserve.
+
+**Abstention is flat for the same reason** and this is the important negative
+result: distance carries **no** correctness information, so option 2 cannot work
+here even though the mechanism is sound. Distance is small for clips that are
+confidently wrong (e.g. a `tre_flip` whose `flip` estimate leans low still sits
+near `(1,0,0)`) and large for clips that are right but noisy. **A working
+abstention signal must come from somewhere other than rotation residual.**
+
+**A second, more general trap, recorded because it is easy to repeat: the axis
+scales must be out-of-fold.** With 2448 features on 331 rows, ridge interpolates
+the training set and in-sample residuals come out at **0.02** — 30× below the
+true error. Dividing by them inflated every distance to **~19** and made the
+abstention sweep unable to retain a single clip. Switched to 5-fold OOF residuals
+(scales 0.64 / 1.13 / 0.68, mean distance 0.65). An in-sample residual on a
+high-dimensional model is a measure of nothing.
+
+**Where the error actually is** (`board_spin`, true vs rounded prediction, n=103):
+
+```
+true\pred    0    1    2    3
+   0         2   17    3    0
+   1         4   28   10    1
+   2         3   20   19    1
+   3         1    3    0    0
+```
+
+Predicted range is `board_spin ∈ [−0.12, 2.60]` against a truth range of `[0, 3]`:
+systematic under-reach at every level, with the mass collapsing onto 1 regardless
+of truth. **This is option 3's territory** — the shrinkage is the defect and
+rescaling the *distance* cannot repair a *biased* estimate.
+
+**Not claimed:** no improvement in name accuracy. 0.068 → 0.062 is a wash and is
+reported as such. Suite: 63 passed, 1 xfailed.
+
+**Next, in order:** (3) replace the shrinking regressors — per-axis classification
+over the integer levels, or a two-part model predicting "is there rotation here"
+then "how much" — and only then re-examine whether a residual signal exists at
+all. If the heads stop collapsing onto the mean, the 0.068 may move, and
+abstention becomes worth revisiting from scratch.
+
 
 Three regressors (`flip`, `board_spin`, `body_spin`) plus the body-rotation family
 classifier that is M3's primary gate target (12.21).
