@@ -485,8 +485,6 @@ def board_summary(board: np.ndarray) -> np.ndarray:
     if usable.size < 2:
         return np.zeros(4, dtype=np.float32)
     return np.array(
-def measure_clip_two_pass(
-
         [
             float(np.median(usable) - usable.min()),
             float(usable.argmin()) / max(len(usable) - 1, 1),
