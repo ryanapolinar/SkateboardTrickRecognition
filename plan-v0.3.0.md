@@ -1513,7 +1513,56 @@ board feature for classification. **Recommendation: stop pushing M2**, take the
 pose-only result as M1/M2's outcome, and do not build a temporal model inside a
 milestone that has already run long.
 
-### 12.21 M3 gate rewritten from the data (2026-09-28)
+### 12.22 Rotation heads: body-rotation family at 0.709, and a silent 0.398 (2026-09-28)
+
+Three regressors (`flip`, `board_spin`, `body_spin`) plus the body-rotation family
+classifier that is M3's primary gate target (12.21).
+
+**Measured on the video-disjoint holdout (331 train / 103 holdout):**
+
+| | |
+|---|---|
+| families learned | `none`, `bs1` (`bs2` dropped: 6 clips, unlearnable) |
+| **body-rotation family accuracy** | **0.7087** |
+| dummy-majority baseline | 0.6019 |
+| axis MAE | flip 0.438, board_spin 0.718, body_spin 0.445 (half-turns / whole flips) |
+| name hit rate (rounds to a known trick) | 0.893 |
+| **name accuracy** | **0.068** |
+
+**Against the 12.21 gate: 0.709 vs 0.75 required — NOT MET, but within 4 points and
+clearly above the 0.6019 dummy.** The margin over the baseline (+11 points) is the
+part that means something.
+
+**The honest reading of `name_accuracy = 0.068`.** The heads land on a known trick
+89 % of the time, but only 7 % of the time on the *right* one. That is not a
+regression failure so much as a **quantisation** one: `name_for` rounds the triple
+to integers, and a head landing at e.g. (0.44, 0.72, 0.45) rounds to (0, 1, 0) —
+`fs_180` — while the true `bs_180_heelflip` is (1, 1, 1). The MAEs above are small
+relative to a half-turn, so the heads are *close* and the rounding discards the
+residual. **This is the tension plan section 4/8 predicts**: the residual is the
+"not sure" signal, and using it to round destroys it. Resolving that needs the
+residual as an explicit uncertainty rather than a rounding step, which is the next
+piece of work, not a tuning knob.
+
+**A silent bug worth recording, because it produced a plausible number.** The family
+classifier initially scored **0.398** — and 0.291 with one ordering — instead of
+0.709. Cause: sklearn returns `coef_` of shape **(1, D)** for a binary target, not
+(2, D). The softmax loop iterated over *rows*, producing one wrong score per class,
+and the class ordering had to be established empirically (the sigmoid is
+`classes_[1]`, i.e. `predict_proba` column 1 — verified with a controlled fit). No
+error, no warning, just a number that looked like a result. **Chasing it by
+re-deriving the pipeline by hand is what found it**; the function and a hand-written
+replica of it disagreed by 31 points, which is the signal worth trusting next time.
+
+**Also removed:** `class_weight="balanced"` from the family model. The families are
+173/158 in training and 62/41 on the holdout — near-balanced — so balancing
+reweights toward the smaller class and *loses* accuracy (0.398 balanced vs 0.709
+unweighted at C=0.1, though part of that gap was the binary bug above; the
+unweighted fit is nonetheless the correct choice for a balanced problem).
+
+**Not claimed:** no M3 gate result. 0.709 < 0.75. The calibration sweep and the
+residual-aware quantisation are both still open.
+
 
 The M3 gate read "correct-or-abstained >= 90 % while abstaining <= 30 % of clips".
 **That number was aspirational and is arithmetically unreachable**, and it was
