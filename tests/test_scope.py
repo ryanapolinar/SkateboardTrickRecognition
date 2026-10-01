@@ -1,4 +1,4 @@
-"""Tests for data validation, allowlist enforcement, and scope guardrails."""
+﻿"""Tests for data validation, allowlist enforcement, and scope guardrails."""
 
 import json
 import tempfile
@@ -1241,3 +1241,141 @@ def test_skateai_holdout_is_video_disjoint():
     assert train_videos and test_videos
     assert not (train_videos & test_videos), "a source video must not leak across the split"
 
+
+
+def _heads_stub(taxonomy, levels=None, axis_scales=None):
+    """A RotationHeads with no fitted regressors, for ranking tests only."""
+    from skateid.recognize import RotationHeads
+    return RotationHeads({}, {}, [], taxonomy, levels=levels, axis_scales=axis_scales)
+
+
+def test_rank_names_never_rounds_and_always_names():
+    """A near-miss triple still names a real trick (plan 12.23/12.24)."""
+    heads = _heads_stub(Taxonomy.load())
+    ranked = heads.rank_names({"flip": 0.44, "board_spin": 0.72, "body_spin": 0.45}, top_k=3)
+    assert len(ranked) == 3
+    assert all(name in Taxonomy.load().dictionary.expressible_names() for name, _ in ranked)
+    # Nearest-first ordering, and no duplicate names.
+    distances = [d for _, d in ranked]
+    assert distances == sorted(distances)
+    assert len({name for name, _ in ranked}) == 3
+
+
+def test_rank_names_exact_hit_has_zero_distance():
+    heads = _heads_stub(Taxonomy.load())
+    ranked = heads.rank_names({"flip": 1.0, "board_spin": 0.0, "body_spin": 0.0}, top_k=1)
+    assert ranked[0][0] == "kickflip"
+    assert ranked[0][1] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_name_for_respects_max_distance_and_abstains_beyond_it():
+    """The residual is kept as an abstention rule, not discarded by rounding."""
+    heads = _heads_stub(Taxonomy.load())
+    near = {"flip": 1.0, "board_spin": 0.0, "body_spin": 0.0}
+    far = {"flip": 1.9, "board_spin": 2.9, "body_spin": 1.9}
+    assert heads.name_for(near, max_distance=0.5) == "kickflip"
+    assert heads.name_for(far, max_distance=0.5) is None
+
+
+def test_rotation_confidence_decays_with_distance():
+    heads = _heads_stub(Taxonomy.load())
+    exact, _, d_exact = heads.rotation_confidence(
+        {"flip": 1.0, "board_spin": 0.0, "body_spin": 0.0}
+    )
+    near, _, _ = heads.rotation_confidence(
+        {"flip": 0.9, "board_spin": 0.1, "body_spin": 0.0}
+    )
+    assert exact > near
+    assert d_exact == pytest.approx(0.0, abs=1e-9)
+    assert 0.0 < near < 1.0
+
+
+def test_axis_scaling_changes_the_nearest_triple():
+    """Per-axis scaling is not a no-op: it must be able to flip the ranking."""
+    from skateid.recognize import RotationHeads
+    taxonomy = Taxonomy.load()
+    heads = RotationHeads({}, {}, [], taxonomy)
+    # Down-weight flip by a large residual SD: the board axis should then dominate.
+    heads.axis_scales = None
+    skewed = RotationHeads({}, {}, [], taxonomy, axis_scales={"flip": 10.0, "board_spin": 0.1, "body_spin": 0.1})
+    prediction = {"flip": 0.6, "board_spin": 0.6, "body_spin": 0.0}
+    # Scaling must change the DISTANCES even where it does not change the winner:
+    # down-weighting flip by 100x inflates every distance, because the flip
+    # residual no longer contributes to the comparison.
+    flat_dist = heads.rank_names(prediction, top_k=1)[0][1]
+    skewed_dist = skewed.rank_names(prediction, top_k=1)[0][1]
+    assert skewed_dist > flat_dist
+    assert skewed.rank_names(prediction, top_k=1)[0][0] == "varial_kickflip"
+
+
+def test_predict_levels_returns_integer_levels_and_probabilities():
+    """Option 3: levels are exact integers and each carries a probability."""
+    import numpy as np
+    from skateid.recognize import RotationHeads
+    heads = RotationHeads({}, {}, [], Taxonomy.load(), levels={
+        # A k-class head has one coef_ row per class, row k scoring classes_[k];
+        # a 2-class head has a single (1, D) row whose sigmoid is classes_[1]
+        # (plan 12.22). Both shapes are pinned here.
+        "flip": {"coef": np.eye(3), "intercept": np.zeros(3), "means": np.zeros(3),
+                 "scales": np.ones(3), "classes": [0, 1, 2]},
+        "board_spin": {"coef": np.eye(3)[:1], "intercept": np.zeros(1), "means": np.zeros(3),
+                       "scales": np.ones(3), "classes": [0, 1]},
+        "body_spin": {"coef": np.eye(3)[:1], "intercept": np.zeros(1), "means": np.zeros(3),
+                      "scales": np.ones(3), "classes": [0, 1]},
+    })
+    # Class 2 of the 3-class head needs the THIRD feature to dominate.
+    assert heads.predict_levels(np.array([0.1, 0.2, 0.9]))["flip"][0] == 2
+    # The 1-row binary head: positive score -> classes_[1], negative -> classes_[0].
+    assert heads.predict_levels(np.array([0.9, 0.1, 0.8]))["board_spin"][0] == 1
+    assert heads.predict_levels(np.array([-0.9, 0.1, 0.8]))["board_spin"][0] == 0
+    levels = heads.predict_levels(np.array([0.1, 0.2, 0.9]))
+    for axis in RotationHeads.AXES:
+        assert isinstance(levels[axis][0], int)
+        assert 0.0 < levels[axis][1] <= 1.0
+
+
+def test_level_confidence_is_a_product_of_axis_probabilities():
+    import numpy as np
+    from skateid.recognize import RotationHeads
+    taxonomy = Taxonomy.load()
+    eye = lambda k: {"coef": np.eye(3)[:k], "intercept": np.zeros(k), "means": np.zeros(3),
+                     "scales": np.ones(3), "classes": list(range(k))}
+    heads = RotationHeads({}, {}, [], taxonomy,
+                          levels={"flip": eye(3), "board_spin": eye(2), "body_spin": eye(2)})
+    joint, levels = heads.level_confidence(np.array([1.0, 1.0, 1.0]))
+    product = 1.0
+    for axis in RotationHeads.AXES:
+        product *= levels[axis][1]
+    assert joint == pytest.approx(product)
+
+
+def test_predict_levels_falls_back_to_regressor_when_axis_absent():
+    """An axis with no usable classifier must not crash or invent a probability."""
+    import numpy as np
+    from skateid.recognize import RotationHeads
+    heads = RotationHeads(
+        {"flip": {"coef": np.ones(3), "intercept": 0.4, "means": np.zeros(3),
+                  "scales": np.ones(3)}},
+        {}, [], Taxonomy.load(),
+    )
+    levels = heads.predict_levels(np.array([0.0, 0.0, 0.0]))
+    assert levels["flip"] == (0, 0.0)          # regressor fallback, prob 0.0
+    assert levels["board_spin"][0] == 0
+
+
+def test_class_probs_binary_and_multiclass_agree_with_predict_proba():
+    """The (1, D) binary case must map to classes_[1] (plan 12.22)."""
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+    from skateid.recognize import _class_probs
+    rng = np.random.RandomState(0)
+    X = rng.randn(200, 3)
+    for n_classes in (2, 3):
+        y = np.array(["ALPHA", "BETA", "GAMMA"][:n_classes])[X[:, 0].argmax() % n_classes] \
+            if False else np.where(X[:, 0] > 0, "ALPHA", "BETA") if n_classes == 2 else \
+            np.digitize(X[:, 0], [-0.5, 0.5])
+        model = LogisticRegression(max_iter=1000).fit(X, y)
+        for row in X[:20]:
+            raw = model.coef_ @ row + model.intercept_
+            ours = _class_probs(raw, list(model.classes_))
+            assert np.allclose(ours, model.predict_proba(row.reshape(1, -1))[0])

@@ -1513,7 +1513,69 @@ board feature for classification. **Recommendation: stop pushing M2**, take the
 pose-only result as M1/M2's outcome, and do not build a temporal model inside a
 milestone that has already run long.
 
-### 12.23 Why 0.45 was not real data, and what ranking the dictionary did (and did not) fix (2026-09-28)
+### 12.24 Option 3: per-axis classification. Name accuracy 0.068 -> 0.126 (2026-09-28)
+
+Replaced the shrinking regressors' role in naming with **per-axis integer-level
+classifiers** (`predict_levels`, `rotations_from_levels`, `level_confidence`).
+`_class_probs` was factored out so the family classifier and all three level
+classifiers score through one tested path — the binary-`coef_` bug of 12.22 can
+no longer be fixed in one place and forgotten in another.
+
+**Levels fitted (dropped ones reported, never silent):**
+
+| axis | levels | train counts | dropped |
+|---|---|---|---|
+| `flip` | 0, 1, 2 | 278 / 31 / 22 | — |
+| `board_spin` | 0, 1, 2 | 147 / 112 / 66 | **3** (6 clips) |
+| `body_spin` | 0, 1 | 173 / 158 | — |
+
+**Per-axis level accuracy vs dummy-majority — the honest unit:**
+
+| axis | level accuracy | dummy | verdict |
+|---|---|---|---|
+| `flip` | 0.767 | **0.786** | **at or below baseline** |
+| `board_spin` | **0.495** | 0.434 | +6 pts, real |
+| `body_spin` | **0.709** | 0.602 | +11 pts, real |
+
+**Name accuracy 0.068 → 0.126** (hit rate 1.000, so every prediction names a real
+dictionary entry). That is the first configuration that beats the old one, and it
+comes from fixing the bias rather than from better distance maths: the regressors
+could only shrink toward the target mean, while a classifier can state "two
+half-turns" or decline to. It is still poor in absolute terms, and **0.126 is not a
+gate result.**
+
+**Two things this did *not* fix, and they matter more than the gain.**
+
+**1. Abstention on the joint level confidence is flat-to-declining** — 0.126 at
+100 % coverage down to 0.097 at 60 %. I expected the product of per-axis
+probabilities to carry correctness information, and it does not. So option 2's
+mechanism fails *again*, now for a second and independent reason: it was flat on
+rotation-distance (12.23) and it is flat on classifier confidence. **The conclusion
+to draw is not "tune the threshold" — it is that nothing measured so far predicts
+when this recogniser is wrong.** A usable abstention signal still does not exist,
+and plan section 4/8's three stacked signals are all currently unverified.
+
+**2. `flip` classification is at/below its dummy baseline** (0.767 vs 0.786) while
+the other two axes clear theirs. `flip` is the axis where §7.1 says pose is
+structurally blind: kickflip and heelflip are mirror-image board motions with
+identical body motion. **The dummy beating the model on exactly the axis predicted
+to be pose-blind is a consistency check on the whole framing, not a
+disappointing number.** Fixing it requires board information (M2), which is
+deferred — so `flip` level accuracy is currently capped by that deferral, not by
+the head type.
+
+**Keep the regressors.** They still report a continuous MAE, which is what showed
+the shrinkage in the first place, and `axis_scales` (OOF) is built from them.
+Classification is an addition, not a replacement; nothing was deleted.
+
+**Suite:** 63 passed, 1 xfailed.
+
+**Where this leaves M3.** The family classifier at 0.7087 remains the best
+rotation-side number and is unchanged. Naming through rotation heads is at 0.126.
+Neither reaches a publishable gate, and the abstention layer — the thing this
+project was built around — still has no working signal. That is the honest
+summary and it should be recorded before any further tuning.
+
 
 **The 0.45 in (0.44, 0.72, 0.45) is not a partial rotation. It is regression
 shrinkage.** Ridge pulls every prediction toward the *mean of the target*, and

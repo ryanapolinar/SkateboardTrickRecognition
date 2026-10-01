@@ -70,6 +70,32 @@ class Prediction:
         out["top"] = [{"label": name, "confidence": score} for name, score in self.top]
         out["display"] = self.display
         return out
+def _class_probs(raw, classes):
+    """Class probabilities from linear scores, handling sklearn's binary form.
+
+    sklearn returns ``coef_`` of shape **(1, D)** for a two-class target, with
+    that row's sigmoid being the probability of ``classes_[1]`` (verified with a
+    controlled fit -- plan 12.22). Iterating such a matrix row-wise yields one
+    wrong score per class, which silently produced 0.398 where the correct
+    mapping gives 0.709. Every model in this module scores through here so that
+    case cannot be handled once and forgotten elsewhere.
+    """
+    raw = np.asarray(raw, dtype=np.float64)
+    classes = list(classes)
+    if raw.size not in (1, len(classes)):
+        raise ValueError(
+            f"model has {raw.size} score(s) for {len(classes)} classes; a fitted model "
+            "has one score per class, or exactly one for a two-class head"
+        )
+    if raw.size == 1 and len(classes) == 2:
+        positive = 1.0 / (1.0 + np.exp(-float(raw[0])))
+        return np.array([1.0 - positive, positive])
+    logits = raw - np.max(raw)
+    exp = np.exp(logits)
+    total = exp.sum()
+    return exp / total if total > 0 else np.full_like(exp, 1.0 / exp.size)
+
+
 def rotation_family(body_rotation_number) -> str:
     """Bucket a trick by how far the **rider's body** rotates.
 
@@ -150,7 +176,7 @@ class RotationHeads:
     AXES = ("flip", "board_spin", "body_spin")
 
     def __init__(self, axes, family, families, taxonomy, include_board=False, metrics=None,
-                 axis_scales=None):
+                 axis_scales=None, levels=None):
         self.axes = axes
         self.family = family
         self.families = list(families)
@@ -161,6 +187,10 @@ class RotationHeads:
         # ranking dictionary triples. None until fitted; ranking then falls back
         # to unit weights, which is measurably worse but never crashes.
         self.axis_scales = dict(axis_scales) if axis_scales else None
+        # Option 3: per-axis integer-level classifiers, keyed by axis. An axis
+        # absent from this dict has no usable classifier and falls back to the
+        # regressor (see predict_levels).
+        self.levels = dict(levels) if levels else {}
         self._candidates = None
 
     def predict_rotations(self, features):
@@ -191,20 +221,71 @@ class RotationHeads:
         scaled = (np.asarray(features, dtype=np.float64) - model["means"]) / model["scales"]
         raw = model["coef"] @ scaled + model["intercept"]
         classes = model["classes"]
-        if raw.size == 1 and len(classes) == 2:
-            # Verified against a direct LogisticRegression fit (plan 12.22): for a
-            # binary target sklearn returns coef_ of shape (1, D) and that row's
-            # sigmoid is the probability of **classes_[1]**, i.e. sklearn's
-            # `predict_proba` column 1. Getting the ordering backwards scored 0.398
-            # and 0.291 where the correct mapping gives 0.709.
-            positive = 1.0 / (1.0 + np.exp(-float(raw[0])))
-            probs = np.array([1.0 - positive, positive])
-        else:
-            logits = raw - np.max(raw)
-            exp = np.exp(logits)
-            probs = exp / exp.sum() if exp.sum() > 0 else np.full_like(exp, 1.0 / exp.size)
-        index = int(probs.argmax())
+        probs = _class_probs(raw, classes)
+        index = int(np.argmax(probs))
         return classes[index], float(probs[index])
+
+    def predict_levels(self, features):
+        """Per-axis integer level and its probability. (Option 3.)
+
+        Classification over the integer levels instead of regression. The
+        regressors shrink every prediction toward the training target mean
+        (plan 12.23), which pinned ``body_spin`` into 0.36-0.60 for *all* clips
+        and collapsed ``board_spin`` onto 1. A classifier has no such failure
+        mode: each level is a separate hypothesis, so a clip either argues for
+        "two half-turns" or it does not, and the probability that the level is
+        *absent* is available as a real number.
+
+        Returns ``{axis: (level, probability)}``.
+        """
+        out = {}
+        for axis in self.AXES:
+            model = self.levels.get(axis)
+            if model is None:
+                # No classifier fitted for this axis (too few clips per level).
+                # Fall back to the regressor rather than inventing a level, and
+                # tolerate that being absent too -- predict_levels must never raise
+                # just because an axis was left unfitted.
+                regressor = self.axes.get(axis)
+                level = 0
+                if regressor is not None:
+                    scaled_r = (
+                        (np.asarray(features, dtype=np.float64) - regressor["means"])
+                        / regressor["scales"]
+                    )
+                    level = int(round(float(regressor["coef"] @ scaled_r + regressor["intercept"])))
+                out[axis] = (level, 0.0)
+                continue
+            scaled = (np.asarray(features, dtype=np.float64) - model["means"]) / model["scales"]
+            raw = model["coef"] @ scaled + model["intercept"]
+            probs = _class_probs(raw, model["classes"])
+            index = int(np.argmax(probs))
+            out[axis] = (int(model["classes"][index]), float(probs[index]))
+        return out
+
+    def rotations_from_levels(self, levels):
+        """Build a continuous-shaped triple from classified levels.
+
+        Levels are exact integers, so this is a pass-through — but it keeps
+        :meth:`rank_names` and the residual maths usable with classified input,
+        which is what lets the two head types share one scoring path.
+        """
+        return {axis: float(levels[axis][0]) for axis in self.AXES}
+
+    def level_confidence(self, features):
+        """Joint confidence in a triple built from the level classifiers.
+
+        The product of the per-axis probabilities, which is the probability the
+        three classifications are *simultaneously* right under an independence
+        assumption. Multiplying (rather than taking the mean) is deliberate: one
+        axis being unsure should sink the whole triple, since a trick whose
+        rotation is unknown is not a known trick at 60 %.
+        """
+        levels = self.predict_levels(features)
+        joint = 1.0
+        for axis in self.AXES:
+            joint *= max(0.0, float(levels[axis][1]))
+        return joint, levels
 
     def candidates(self):
         """Every rotation triple in the dictionary, cached.
@@ -462,6 +543,7 @@ def fit_rotation_heads(
     taxonomy: Taxonomy,
     include_board: bool = False,
     min_family_clips: int = 10,
+    min_level_clips: int = 15,
     alpha: float = 10.0,
     C: float = 0.1,
 ):
@@ -546,6 +628,42 @@ def fit_rotation_heads(
         # Floor the scale: a near-zero value would again make distances explode.
         axis_scales[axis] = max(float(np.sqrt((residual ** 2).mean())), 1e-3)
 
+    # Option 3: per-axis integer-level classifiers. Levels below
+    # min_level_clips are dropped per axis and reported, because a level with a
+    # handful of clips is unlearnable and only adds a class nobody can score.
+    # Note this is a *different* threshold from min_family_clips: a level can be
+    # thin overall and still be the dominant value for its axis (board_spin=0 is
+    # the majority of every trick class), so the two gates are not merged.
+    levels = {}
+    level_report = {}
+    for axis in RotationHeads.AXES:
+        target = aligned[axis].to_numpy(int)
+        level_counts = pd.Series(target).value_counts()
+        usable = [int(v) for v, c in level_counts.items() if c >= min_level_clips]
+        dropped_levels = sorted(int(v) for v in level_counts.index if level_counts[v] < min_level_clips)
+        mask = np.isin(target, usable)
+        if len(usable) < 2 or len(set(target[mask])) < 2:
+            level_report[axis] = {
+                "fitted": False,
+                "reason": "fewer than two usable levels",
+                "levels": sorted(usable),
+                "dropped_levels": dropped_levels,
+            }
+            continue
+        clf = LogisticRegression(max_iter=3000, C=C)
+        clf.fit(scaled[mask], target[mask])
+        levels[axis] = {
+            "coef": clf.coef_, "intercept": clf.intercept_,
+            "means": means, "scales": scales,
+            "classes": list(clf.classes_),
+        }
+        level_report[axis] = {
+            "fitted": True,
+            "levels": [int(v) for v in clf.classes_],
+            "dropped_levels": dropped_levels,
+            "train_counts": {int(k): int(v) for k, v in level_counts.items()},
+        }
+
     heads = RotationHeads(
         axes,
         {"coef": family_model.coef_, "intercept": family_model.intercept_,
@@ -559,14 +677,17 @@ def fit_rotation_heads(
         taxonomy,
         include_board=include_board,
         axis_scales=axis_scales,
+        levels=levels,
     )
 
     metrics = {
         "families": list(family_model.classes_),
         "dropped_families": dropped,
         "min_family_clips": min_family_clips,
+        "min_level_clips": min_level_clips,
         "alpha": alpha,
         "axis_scales": axis_scales,
+        "level_report": level_report,
         "train_clips": int(X_train.shape[0]),
         "dims": int(X_train.shape[1]),
         "holdout_clips": 0,
@@ -627,6 +748,58 @@ def fit_rotation_heads(
         metrics["ranked_vs_rounded_disagreements"] = int(
             sum(1 for r, n in zip(top1, named) if r and r[0][0] != n)
         )
+
+        # Option 3 evaluation: does per-axis classification beat regression? Judged
+        # on the per-axis level itself (the honest unit) and on the resulting name.
+        metrics["level_accuracy"] = {}
+        metrics["level_dummy_accuracy"] = {}
+        for axis in RotationHeads.AXES:
+            if axis not in heads.levels:
+                metrics["level_accuracy"][axis] = None
+                metrics["level_dummy_accuracy"][axis] = None
+                continue
+            predicted = [heads.predict_levels(row)[axis][0] for row in X_test]
+            actual = truth[axis].to_numpy(int)
+            # Only score levels the classifier was actually fitted to predict;
+            # scoring a dropped level would measure "can it guess the unseen".
+            known = np.isin(actual, np.array(heads.levels[axis]["classes"]))
+            metrics["level_accuracy"][axis] = (
+                float(np.mean([p == a for p, a in zip(predicted, actual)]))
+                if known.any() else None
+            )
+            train_mask = np.isin(aligned[axis].to_numpy(int),
+                                 np.array(heads.levels[axis]["classes"]))
+            majority = (
+                pd.Series(aligned[axis].to_numpy(int)[train_mask])
+                .value_counts().idxmax()
+            )
+            metrics["level_dummy_accuracy"][axis] = (
+                float(np.mean(actual[known] == majority)) if known.any() else None
+            )
+
+        level_names, level_confs = [], []
+        for row, lbl in zip(X_test, truth["label"].to_numpy()):
+            levels_pred = heads.predict_levels(row)
+            triple = heads.rotations_from_levels(levels_pred)
+            name = heads.name_for(triple)
+            joint, _ = heads.level_confidence(row)
+            level_names.append(name)
+            level_confs.append(joint)
+        metrics["level_name_accuracy"] = float(
+            np.mean([n == t for n, t in zip(level_names, truth["label"].to_numpy())])
+        )
+        metrics["level_name_hit_rate"] = float(np.mean([n is not None for n in level_names]))
+        # This is the first configuration where confidence is expected to carry
+        # information: it is a product of per-axis classification probabilities,
+        # not a distance in rotation space (which measured flat in 12.23).
+        finite = [(c, n == t) for c, n, t in zip(level_confs, level_names, truth["label"].to_numpy())]
+        for cut in (0.1, 0.2, 0.3, 0.4, 0.5):
+            kept = [(c, ok) for c, ok in finite if c >= cut]
+            metrics.setdefault("level_abstention_sweep", {})[str(cut)] = {
+                "kept": len(kept),
+                "accuracy": float(np.mean([ok for _, ok in kept])) if kept else None,
+                "coverage": len(kept) / len(finite) if finite else 0.0,
+            }
 
     heads.metrics = metrics
     return heads, metrics
